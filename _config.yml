@@ -1,0 +1,35 @@
+title: "From Data Scientist to Performance Engineer"
+author: Pierre de Malliard
+copyright: "2026"
+logo: assets/logo.png
+
+execute:
+  execute_notebooks: "off"  # pre-executed notebooks committed with outputs
+
+repository:
+  url: https://github.com/Pidem/neuron-performance-book
+  branch: main
+
+launch_buttons:
+  notebook_interface: "classic"
+  thebe: true
+
+html:
+  use_issues_button: true
+  use_repository_button: true
+  use_edit_page_button: true
+  home_page_in_navbar: false
+  extra_footer: |
+    <p>Making the most of your PyTorch models on Neuron chips</p>
+
+sphinx:
+  extra_extensions:
+    - sphinx_proof
+  config:
+    html_theme_options:
+      navigation_with_keys: true
+    mathjax3_config:
+      tex:
+        macros:
+          "N": "\\mathbb{N}"
+          "floor": ["\\lfloor#1\\rfloor", 1]

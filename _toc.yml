@@ -1,0 +1,43 @@
+format: jb-book
+root: intro
+
+parts:
+  - caption: "Part I: What You Think You Know"
+    chapters:
+      - file: part1/ch01-model-x
+      - file: part1/ch02-tensors
+      - file: part1/ch03-compiler
+
+  - caption: "Part II: From GPU to Neuron"
+    chapters:
+      - file: part2/ch04-hardware
+      - file: part2/ch05-pytorch-native
+      - file: part2/ch06-eager-mode
+      - file: part2/ch07-torch-compile
+      - file: part2/ch08-memory-hierarchy
+
+  - caption: "Part III: Measuring Before Optimizing"
+    chapters:
+      - file: part3/ch09-profiler
+      - file: part3/ch10-roofline
+
+  - caption: "Part IV: Precision & Numerics"
+    chapters:
+      - file: part4/ch11-number-formats
+      - file: part4/ch12-casting-neuron
+
+  - caption: "Part V: Writing Your Own Kernels (NKI)"
+    chapters:
+      - file: part5/ch13-why-kernels
+      - file: part5/ch14-first-nki-kernel
+      - file: part5/ch15-thinking-in-tiles
+      - file: part5/ch16-advanced-nki
+
+  - caption: "Part VI: Distributed & Production"
+    chapters:
+      - file: part6/ch17-distributed
+      - file: part6/ch18-production
+
+  - caption: Appendix
+    chapters:
+      - file: appendix/gpu-to-neuron-migration
