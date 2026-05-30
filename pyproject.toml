@@ -1,0 +1,11 @@
+[project]
+name = "neuron-performance-book"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "jupyter-book==1.0.3",
+    "sphinx-proof",
+]
+
+[tool.uv]
+dev-dependencies = []
