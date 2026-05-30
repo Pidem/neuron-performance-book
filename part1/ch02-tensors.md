@@ -1,8 +1,8 @@
 # Tensors aren't just arrays
 
-In Chapter 1, we watched the dispatcher route `aten::matmul` to a backend kernel. But what exactly is the dispatcher *passing* to that kernel? Not "a matrix" — that's a mathematical concept. The kernel needs to know: where does the data live in memory? How big is each element? How do I find element `[i, j]`?
+In Chapter 1, we watched the dispatcher route `aten::matmul` to a backend kernel. But what exactly does the kernel receive? Not "a matrix" — that's a mathematical concept. The kernel needs a physical address, a way to navigate the memory layout, and enough metadata to interpret the bytes.
 
-The answer is the **tensor** — not the mathematical object, but PyTorch's data structure. A tensor is a *view* into a block of memory, equipped with just enough metadata to navigate it. Understanding this data structure is the key to understanding why some operations are free and others are expensive — and why the same mathematical operation can have wildly different performance depending on how the data is laid out.
+That's what a **tensor** is in PyTorch: a view into a block of memory, plus the metadata to navigate it. This distinction — data vs. view of data — determines which operations are free and which silently copy gigabytes behind your back.
 
 ---
 
@@ -15,19 +15,19 @@ from transformers import EsmModel
 model = EsmModel.from_pretrained("facebook/esm2_t33_650M_UR50D")
 
 embed = model.embeddings.word_embeddings.weight
+print(f"Pointer:  {embed.data_ptr()}")
 print(f"Shape:    {embed.shape}")
 print(f"Dtype:    {embed.dtype}")
-print(f"Strides:  {embed.stride()}")
 print(f"Device:   {embed.device}")
-print(f"Pointer:  {embed.data_ptr()}")
+print(f"Strides:  {embed.stride()}")
 ```
 
-```
+```none
+Pointer:  494627968
 Shape:    torch.Size([33, 1280])
 Dtype:    torch.float32
-Strides:  (1280, 1)
 Device:   cpu
-Pointer:  140234567890944
+Strides:  (1280, 1)
 ```
 
 That's the whole tensor. Five fields:
@@ -44,11 +44,11 @@ That's the whole tensor. Five fields:
 └─────────────────────────────────────────────────────────┘
 ```
 
-The data pointer says *where*. The shape says *how big* (logically). The dtype says *what kind*. The device says *which hardware*. But strides — strides are the interesting one.
+The data pointer gives the starting address. The shape describes logical dimensions. The dtype says how many bytes per element and how to interpret them. The device tells the dispatcher which hardware owns this memory. And strides — the interesting one — encode how to convert a multi-dimensional index into a byte offset, which is what makes transpose and reshape possible without copying.
 
 ---
 
-## Act 2: Strides — the navigation system
+## Act 2: Strides 
 
 Memory is flat. A 2D tensor is a human concept. The hardware sees a linear sequence of bytes. Strides tell you how to convert a logical index `[i, j]` into a physical memory offset:
 
@@ -152,7 +152,7 @@ This is free. But there's a catch.
 
 ---
 
-## Act 4: Contiguity — when free becomes expensive
+## Act 4: Contiguity
 
 A tensor is **contiguous** when its strides match what you'd expect from its shape — i.e., elements are laid out in memory in the "natural" row-major order. Our original embedding is contiguous. The transpose is not:
 
@@ -166,7 +166,11 @@ embed contiguous:   True
 embed.T contiguous: False
 ```
 
-Why does this matter? Because many operations **require** contiguous input. When you call `.reshape()` on a non-contiguous tensor, PyTorch must allocate new memory and copy:
+Why does this matter? Because kernels load data from device memory (HBM) into fast on-chip SRAM via DMA transfers that operate on **contiguous address ranges**. One DMA instruction says "starting at address X, copy N consecutive bytes." If your tensor is contiguous, that's one burst. If it's non-contiguous — say, a transpose where consecutive logical elements are 1280 floats apart — the hardware must issue separate transfers for each row, wasting bandwidth.
+
+This applies on both GPU (where contiguous data streams efficiently through the cache hierarchy) and Neuron (where DMA loads tiles from HBM into SBUF). We'll see the hardware details in Chapter 4.
+
+When you call `.reshape()` on a non-contiguous tensor, PyTorch must allocate new memory and copy:
 
 ```python
 # Contiguous tensor: reshape is free (just a view)
@@ -196,7 +200,7 @@ The rule:
 
 ---
 
-## Act 5: ESM-2's attention matrices — a real example
+## Act 5: The ESM-2's attention matrices example
 
 Let's look at where layout matters in practice. Run a forward pass and grab the attention weights:
 
@@ -227,58 +231,44 @@ row    stride = 32     (= seq_len — skip one row)
 col    stride = 1      (adjacent in memory)
 ```
 
-This means: **within one attention head, the seq×seq matrix is contiguous**. Accessing `attn[0, 0]` (one head's full attention pattern) gives you a contiguous 32×32 block — perfect for a kernel that processes one head at a time.
+This means: **within one attention head, the seq×seq matrix is contiguous**. Accessing `attn[0, 0]` (one head's full attention pattern) gives you a contiguous 32×32 block — exactly what a kernel wants when it processes one head at a time.
 
 But what if you wanted all heads' attention for position 5 attending to position 10?
 
 ```python
 across_heads = attn[0, :, 5, 10]  # shape: [20]
 print(f"Strides: {across_heads.stride()}")
-print(f"Contiguous: {across_heads.is_contiguous()}")
 ```
 
 ```
 Strides: (1024,)
-Contiguous: True
 ```
 
-Wait — this *is* contiguous? Yes, because a 1D tensor with any stride is always "contiguous" (there's only one dimension, so elements are trivially in order). But the stride is 1024 — meaning each element is 1024 floats apart in memory. A DMA engine loading this would fetch 20 values scattered across 80 KB of memory, rather than 20 adjacent values in 80 bytes.
+PyTorch reports this 1D tensor as "contiguous" (a 1D tensor is trivially contiguous — there's no second dimension to be out of order with). But look at the stride: 1024. Each element is 1024 floats apart in physical memory. Loading these 20 values means touching 20 scattered cache lines across 80 KB, rather than reading 80 consecutive bytes.
 
 This is why attention implementations carefully choose which dimension to parallelize over. Parallelizing over heads (dim 1) gives each thread a contiguous seq×seq block. Parallelizing over sequence positions would give each thread scattered data.
 
 ---
 
-## Act 6: Why this matters for accelerators
+## Act 6: The memory hierarchy
 
-On any accelerator — GPU or Neuron — there's a memory hierarchy:
+We've said "contiguous is faster" — but faster at what, exactly? At moving data through the memory hierarchy that every accelerator shares:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  On-chip SRAM (fast, small)                 │
-│  - GPU: shared memory, L1/L2 cache          │
-│  - Neuron: SBUF (State Buffer), PSUM        │
+│  On-chip SRAM (fast, small, ~tens of MB)    │
+│  - GPU: shared memory / L1 cache            │
+│  - Neuron: SBUF (State Buffer) + PSUM       │
 ├─────────────────────────────────────────────┤
-│  Device memory (slow, large)                │
-│  - GPU: HBM (High Bandwidth Memory)        │
+│  Device memory (slow, large, ~tens of GB)   │
+│  - GPU: HBM                                 │
 │  - Neuron: HBM                              │
 └─────────────────────────────────────────────┘
 ```
 
-Kernels work by loading **tiles** from device memory into on-chip SRAM, computing on them, and writing results back. The DMA engine that moves these tiles works best when the data is contiguous — it can issue one large transfer instead of many small ones.
+Every kernel's inner loop is: load a tile from HBM into SRAM, compute, write the result back. The DMA engine that moves tiles works in contiguous bursts (as we saw in Act 4). A well-laid-out tensor means fewer, larger bursts. A poorly-laid-out tensor means many small scattered reads.
 
-When a kernel receives a non-contiguous tensor:
-1. It might call `.contiguous()` internally (hidden copy — you pay for it but don't see it)
-2. It might use strided access (slower DMA, underutilized bandwidth)
-3. On Neuron specifically: the compiler may insert explicit data rearrangement instructions to pack tiles into SBUF-friendly layouts
-
-This is the connection to Chapter 1's fusion story. Remember:
-
-```
-Without fusion: matmul → write to HBM → read from HBM → softmax → ...
-With fusion:    Load once → compute everything in SRAM → write once
-```
-
-Fusion eliminates HBM round-trips. But even *within* a single kernel, the layout of your tensor determines how efficiently data moves from HBM to SRAM. A contiguous tile loads in one burst. A strided tile requires gather operations.
+This connects back to Chapter 1's fusion story. Fusion eliminates *inter-kernel* HBM round-trips (intermediates stay in SRAM). But layout determines how efficiently each kernel does its *intra-kernel* loads. Both matter. A fused kernel on badly-laid-out data still wastes bandwidth.
 
 ---
 
@@ -338,10 +328,11 @@ Chapter 2: What does the kernel receive?
            - Which kernel the dispatcher selects
 ```
 
-The kernel doesn't see "a matrix." It sees a pointer, a shape, and strides. Its job is to load tiles from device memory into fast on-chip SRAM, compute, and write back. How well it can do this depends entirely on how the data is laid out.
+The kernel doesn't see "a matrix." It sees a pointer, a shape, and strides. How well it can load tiles from HBM into SRAM depends entirely on how the data is laid out.
 
-But here's the thing: in eager mode (Chapter 1), each kernel makes its own local decision about tiling and layout. No kernel knows what the *next* kernel needs. If kernel A writes its output in layout X, and kernel B needs layout Y, someone has to pay for the rearrangement.
+But in eager mode, each kernel makes its own local decision about layout. No kernel knows what the *next* kernel needs. If kernel A writes in layout X and kernel B needs layout Y, someone pays for the rearrangement.
 
 *What if something could see the whole graph of operations and choose layouts globally?*
 
 That's the compiler. Chapter 3.
+````
