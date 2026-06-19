@@ -10,6 +10,16 @@ jupyter-book build .
 open _build/html/index.html
 ```
 
+## Book Progress
+- [X] Intro 
+- [X] Part I
+- [ ] Part II
+- [ ] Part III
+- End to end examples with nki.language and nki.isa?
+- Repos of existing kernels
+- Multi-core/multichip patterns?
+
+
 ## Deploy
 
 Pushes to `main` auto-deploy to GitHub Pages via the workflow in `.github/workflows/deploy.yml`.
