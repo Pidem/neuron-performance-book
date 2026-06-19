@@ -2,13 +2,18 @@
 
 Making the most of your PyTorch models on Neuron chips.
 
-## Build locally
+
+
+## Build the book and read locally
 
 ```bash
 pip install -r requirements.txt
 jupyter-book build .
 open _build/html/index.html
 ```
+
+## To deploy trn2 instance reach out to @pidemal
+run `workshop-stack.yml` and use the AMI provided by pierre. 
 
 ## Book Progress
 - [X] Intro 
