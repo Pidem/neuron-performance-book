@@ -29,6 +29,13 @@ We follow **ESM-2** (a 650M-parameter protein language model) from a black-box f
 
 All code in this book runs on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM). No GPU required — the entire book runs on Neuron from Chapter 1.
 
+```{figure} assets/trn2_chip.png
+:alt: Trainium2 chip
+:width: 400px
+:align: center
+
+The AWS Trainium2 chip — your workstation for this book.
+```
 ### Provisioning a trn2.3xlarge via Capacity Blocks
 
 Capacity Blocks let you reserve Trainium instances for a fixed duration at a predictable cost (~$2.20/hr). At the time of writing, `trn2.3xlarge` Capacity Blocks are available in:

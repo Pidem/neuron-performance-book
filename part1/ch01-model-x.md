@@ -19,7 +19,7 @@ inputs = tokenizer(sequence, return_tensors="pt")
 ```
 
 ```none
-2.10.0+cu130
+2.11.0+cpu
 ```
 
 ```python
@@ -50,21 +50,21 @@ for e in sorted(events, key=lambda e: e.cpu_time_total, reverse=True)[:10]:
 ```
 
 ```none
-  aten::as_strided                                   called 1079 times, total     1.2ms
-  aten::view                                         called  666 times, total     2.0ms
-  aten::transpose                                    called  530 times, total     2.8ms
-  aten::resolve_conj                                 called  400 times, total     0.1ms
-  aten::to                                           called  352 times, total     3.6ms
-  aten::copy_                                        called  346 times, total     4.9ms
-  aten::addmm                                        called  264 times, total   812.3ms
-  aten::scaled_dot_product_attention                  called   33 times, total   245.1ms
-  aten::layer_norm                                   called   67 times, total    61.3ms
-  aten::gelu                                         called   33 times, total    38.7ms
+  aten::scaled_dot_product_attention                 called   33 times, total   307.2ms
+  aten::_scaled_dot_product_flash_attention_for_cpu  called   33 times, total   306.5ms
+  aten::linear                                       called  199 times, total   294.9ms
+  aten::addmm                                        called  199 times, total   292.0ms
+  aten::matmul                                       called    1 times, total   227.4ms
+  aten::bmm                                          called    1 times, total   227.3ms
+  aten::cos                                          called    1 times, total   185.8ms
+  aten::cumsum                                       called    1 times, total   100.9ms
+  aten::erf                                          called   33 times, total    97.0ms
+  aten::layer_norm                                   called   67 times, total    59.2ms
 ```
 
 ```{admonition} Observation
 :class: important
-ESM-2 (650M params, 33 layers) decomposes into just a handful of ATen ops repeated hundreds of times. The "intelligence" is in the **weights**, not the ops. These are operations such as additions, transposes, views, multiplications.
+ESM-2 (650M params, 33 layers) decomposes into just a handful of ATen ops repeated hundreds of times. These are operations such as additions, transposes, views, multiplications.
 ```
 
 ---
@@ -101,8 +101,8 @@ print(f"After linear:     shape={x_proj.shape}, first value={x_proj[0,0,0]:.4f}"
 ```
 
 ```none
-After layer_norm: mean=-0.000000, std=1.0001
-After linear:     shape=torch.Size([1, 32, 1280]), first value=-0.3842
+After layer_norm: mean=0.000000, std=1.0000
+After linear:     shape=torch.Size([1, 32, 1280]), first value=-0.2090
 ```
 
 In a graph framework, these would be placeholders with no value yet. In eager mode, every tensor is real the instant it's created.
@@ -151,6 +151,7 @@ Every indentation = a Python function call. Every ATen op = an immediate computa
 What does a transformer layer actually compute? Strip away the HuggingFace wrapper, and ESM-2's attention is just 6 PyTorch operations: four linear projections (`addmm`), one matmul for attention scores, one softmax, and one matmul to combine values. That's it. Let's rebuild it from scratch to prove it:
 
 ```python
+import torch
 import torch.nn.functional as F
 
 class ESMAttentionManual(torch.nn.Module):
@@ -206,14 +207,13 @@ for e in sorted(prof.key_averages(), key=lambda e: e.cpu_time_total, reverse=Tru
 
 ```none
 Output shape: torch.Size([1, 32, 1280])
-
 Ops dispatched:
+  aten::linear                             called   4 times
   aten::addmm                              called   4 times
-  aten::matmul                             called   2 times
   aten::softmax                            called   1 times
-  aten::masked_fill                        called   0 times
-  aten::transpose                          called   5 times
-  aten::view                               called   5 times
+  aten::matmul                             called   2 times
+  aten::_softmax                           called   1 times
+  aten::reshape                            called   4 times
 ```
 
 Our 30-line class triggers the same ATen ops as the full 650M-parameter ESM-2. The dispatcher sees no difference — it doesn't know whether it's running a protein language model or a toy. It just receives `matmul`, `softmax`, `matmul` and routes them to the appropriate kernel.
@@ -250,40 +250,66 @@ MKL   cuBLAS  Neuron   Metal    oneDNN
 We can actually see which backend kernel the dispatcher picked by profiling with `record_shapes=True`:
 
 ```python
+import torch
+
 A = torch.randn(32, 64)
 B = torch.randn(64, 128)
 
-# CPU dispatch — profile to see which kernel runs
+# CPU dispatch
+print("CPU:")
 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True) as p:
     C_cpu = torch.matmul(A, B)
 for e in p.key_averages():
     if 'mm' in e.key:
-        print(f"  CPU kernel: {e.key}")
+        print(f"  {e.key}  cpu_time={e.cpu_time_total:.0f}µs")
 
-# GPU dispatch — same call, different kernel
-if torch.cuda.is_available():
-    A_g, B_g = A.cuda(), B.cuda()
-    torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        record_shapes=True
-    ) as p:
-        C_cuda = torch.matmul(A_g, B_g)
-        torch.cuda.synchronize()
-    for e in p.key_averages():
-        if 'mm' in e.key or 'gemm' in e.key.lower():
-            print(f"  CUDA kernel: {e.key}")
-    print(f"  Same result: {torch.allclose(C_cpu, C_cuda.cpu(), atol=1e-5)}")
+print(10*"-")
+
+# Neuron dispatch — first pass (compilation)
+A_n, B_n = A.to("neuron"), B.to("neuron")
+print("Neuron first pass (with compilation):")
+with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True) as p:
+    C_neuron = torch.matmul(A_n, B_n)
+for e in p.key_averages():
+    if 'mm' in e.key or 'neuron' in e.key.lower():
+        print(f"  {e.key}  cpu_time={e.cpu_time_total:.0f}µs")
+
+print(10*"-")
+
+# Neuron dispatch — second pass (cached NEFF)
+print("Neuron second pass (cached NEFF):")
+with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], record_shapes=True) as p:
+    C_neuron2 = torch.matmul(A_n, B_n)
+for e in p.key_averages():
+    if 'mm' in e.key or 'neuron' in e.key.lower():
+        print(f"  {e.key}  cpu_time={e.cpu_time_total:.0f}µs")
+
+print(f"\nSame result: {torch.allclose(C_cpu, C_neuron.cpu(), atol=1e-3)}")
 ```
 
 ```none
-  CPU kernel: aten::mm
-  CUDA kernel: aten::mm
-  CUDA kernel: volta_sgemm_32x32_sliced1x4_nn
-  Same result: True
+CPU:
+  aten::mm  cpu_time=414µs
+----------
+Neuron first pass (with compilation):
+  aten::mm  cpu_time=8506µs
+----------
+Neuron second pass (cached NEFF):
+  aten::mm  cpu_time=49µs
+
+Same result: True
 ```
 
-Same `aten::mm` at the Python level, but on CUDA it dispatches to `ampere_sgemm_32x128_tn` — an NVIDIA-specific GEMM kernel optimized for this shape on Ampere GPUs. On Neuron, it would dispatch to a compiled NEFF. **Your code doesn't change.** (The math doesn't change)
+Both CPU and Neuron enter through the same `aten::mm` dispatch. On CPU, this calls into Intel MKL (AVX-512). On Neuron, it compiles the op into a NEFF — a binary instruction sequence tailored to this exact shape on NeuronCore hardware. The first pass pays the compilation cost (~8.5ms); the second pass runs from cache in 49µs. **The underlying math doesn't change.**
+
+| | Neuron |
+|---|---|
+| **Kernel format** | HLO → NEFF (Neuron Executable File Format) |
+| **When compiled** | First call (JIT), then cached in `/tmp/neff_cache` |
+| **First-call penalty** | ~seconds (neuronx-cc compilation) |
+| **Subsequent calls** | Instant (loaded from NEFF cache) |
+
+An accelerator can't run Python — it needs machine code specific to its hardware. On Neuron, the compiler generates a *bespoke* NEFF for your exact computation and shape. This is why warmup matters in eager mode. 
 
 ---
 
@@ -303,6 +329,47 @@ Manual attention:                     Fused SDPA:
 5 op dispatches → 1 op dispatch. Same math. Fewer kernel launches.
 
 ```python
+import torch
+import torch.nn.functional as F
+
+class ESMAttentionManual(torch.nn.Module):
+    """Exactly what one ESM-2 attention layer does, using raw ATen ops."""
+    
+    def __init__(self, d_model=1280, n_heads=20):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads  # 64
+        self.scale = self.d_head ** -0.5
+        self.q_proj = torch.nn.Linear(d_model, d_model)
+        self.k_proj = torch.nn.Linear(d_model, d_model)
+        self.v_proj = torch.nn.Linear(d_model, d_model)
+        self.out_proj = torch.nn.Linear(d_model, d_model)
+    
+    def forward(self, x, attention_mask=None):
+        B, L, D = x.shape
+        
+        # Op 1: aten::addmm (linear projection)
+        Q = self.q_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
+        K = self.k_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
+        V = self.v_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
+        
+        # Op 2: aten::matmul (Q @ K^T)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        
+        # Op 3: aten::masked_fill
+        if attention_mask is not None:
+            scores = scores.masked_fill(attention_mask == 0, float('-inf'))
+        
+        # Op 4: aten::softmax
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # Op 5: aten::matmul (attn @ V)
+        context = torch.matmul(attn_weights, V)
+        context = context.transpose(1, 2).contiguous().view(B, L, D)
+        
+        # Op 6: aten::addmm (output projection)
+        return self.out_proj(context)
+
 class ESMAttentionFused(torch.nn.Module):
     """Same math as ESMAttentionManual, but using the fused SDPA op."""
     
@@ -328,7 +395,10 @@ class ESMAttentionFused(torch.nn.Module):
         return self.out_proj(context)
 
 # Compare op counts
+manual_attn = ESMAttentionManual(d_model=1280, n_heads=20).eval()
 fused_attn = ESMAttentionFused(d_model=1280, n_heads=20).eval()
+
+x = torch.randn(1, 32, 1280)
 
 with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as p1:
     with torch.no_grad():
@@ -338,17 +408,28 @@ with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as
     with torch.no_grad():
         out_fused = fused_attn(x)
 
-attn_ops = ['matmul', 'softmax', 'scaled_dot_product', 'masked_fill']
-manual_count = sum(e.count for e in p1.key_averages() if any(op in e.key for op in attn_ops))
-fused_count = sum(e.count for e in p2.key_averages() if any(op in e.key for op in attn_ops))
+attn_core_ops = ['bmm', 'matmul', 'softmax', '_softmax', 'scaled_dot_product', 'masked_fill']
+manual_events = [(e.key, e.count) for e in p1.key_averages() if any(op in e.key for op in attn_core_ops)]
+fused_events = [(e.key, e.count) for e in p2.key_averages() if any(op in e.key for op in attn_core_ops)]
 
-print(f"Manual path — attention op dispatches: {manual_count}")
-print(f"Fused path  — attention op dispatches: {fused_count}")
+print("Manual path (attention core ops):")
+for key, count in manual_events:
+    print(f"  {key:<45} ×{count}")
+print(f"\nFused path (attention core ops):")
+for key, count in fused_events:
+    print(f"  {key:<45} ×{count}")
 ```
 
 ```none
-Manual path — attention op dispatches: 4
-Fused path  — attention op dispatches: 2
+Manual path (attention core ops):
+  aten::matmul                                  ×2
+  aten::bmm                                     ×2
+  aten::softmax                                 ×1
+  aten::_softmax                                ×1
+
+Fused path (attention core ops):
+  aten::scaled_dot_product_attention            ×1
+  aten::_scaled_dot_product_flash_attention_for_cpu ×1
 ```
 
 ```{admonition} Why fusion matters
@@ -356,7 +437,6 @@ Fused path  — attention op dispatches: 2
 The fused kernel does matmul+mask+softmax+matmul in ONE shot:
 - Fewer kernel launches (less dispatch overhead)
 - Data stays in fast on-chip memory (no round-trips to HBM)
-- On GPU: FlashAttention under the hood
 - On Neuron: the compiler fuses into a single NEFF
 ```
 
@@ -364,10 +444,10 @@ The fused kernel does matmul+mask+softmax+matmul in ONE shot:
 
 ## Where does the data live?
 
-Once you move your model and inputs to a device (`model.to("cuda")` or `model.to("neuron")`), data stays there. Between ops, **nothing moves back to CPU**:
+Once you move your model and inputs to a device (`model.to("neuron")`), data stays there. Between ops, **nothing moves back to CPU**:
 
 ```
-CPU (Python + dispatcher)              Device memory (GPU VRAM / Neuron HBM)
+CPU (Python + dispatcher)              Device memory (Neuron HBM)
 ─────────────────────────              ──────────────────────────────────────
                                        Q, K, V tensors live here
                                        ↓
@@ -383,67 +463,44 @@ CPU (Python + dispatcher)              Device memory (GPU VRAM / Neuron HBM)
 
 The CPU's role is issuing commands. The data never crosses the bus between ops — unless an operation **isn't supported** on the device. In that case, the dispatcher silently moves the tensor to CPU, runs the op there, and moves the result back. This is called a **fallback**.
 
-Fallbacks are functionally correct but expensive (data transfer + losing device parallelism). We'll see this concretely in Chapter 6 when we run PyTorch Geometric's `scatter` operations on Neuron — they fall back to CPU because Neuron doesn't have a native kernel for them yet.
+Fallbacks are functionally correct (the math is identical) but expensive (data transfer + losing device parallelism). We'll see this in more detail in Chapter 6.
 
 ### Asynchronous execution and synchronization
 
-Accelerators (both GPU and Neuron) execute **asynchronously**: when Python calls `torch.matmul(A, B)`, it doesn't wait for the result. It queues the work and immediately returns to Python. This means:
-
-- Python can queue the *next* op while the device is still computing the current one
-- The profiler's "CPU time" includes dispatch overhead, not actual compute
-- If you time with `time.time()`, you're measuring how fast Python can *queue* work, not how fast the device *does* it
-
-To get accurate timing, you need to **synchronize** — force Python to wait until all queued work finishes:
+Neuron executes **asynchronously**: when Python calls `torch.matmul(A, B)`, it doesn't wait for the hardware to finish. It queues the work and returns immediately. We can prove this:
 
 ```python
-# GPU: wait for all queued CUDA kernels to finish
-torch.cuda.synchronize()
+import torch, time
 
-# Neuron: wait for all queued Neuron ops to finish
-# (handled automatically in eager mode — each op blocks until its NEFF completes)
+A = torch.randn(4096, 4096, device="neuron", dtype=torch.bfloat16)
+B = torch.randn(4096, 4096, device="neuron", dtype=torch.bfloat16)
+
+# Without sync — measures how fast Python can QUEUE the work
+start = time.time()
+C = torch.matmul(A, B)
+dispatch_time = time.time() - start
+
+# With sync — measures how long the hardware actually takes
+start = time.time()
+C = torch.matmul(A, B)
+torch.neuron.synchronize()
+exec_time = time.time() - start
+
+print(f"Dispatch only: {dispatch_time*1000:.1f}ms")
+print(f"With sync:     {exec_time*1000:.1f}ms")
 ```
 
-On Neuron in eager mode, each op is synchronous by default (it JIT-compiles and executes before returning). This makes debugging easier but is slower than GPU's async pipeline — which is one reason `torch.compile` matters more on Neuron.
-
-### Why do kernels need to be compiled?
-
-An accelerator can't run Python. It needs machine code specific to its hardware. The **kernel** is that machine code — a compiled function that runs on the device.
-
-| | GPU (CUDA) | Neuron |
-|---|---|---|
-| **Kernel format** | PTX → SASS (machine code) | HLO → NEFF (Neuron Executable) |
-| **When compiled** | First call (JIT), then cached | First call (JIT), then cached in `/tmp/neuron_cache` |
-| **First-call penalty** | ~100ms (cuDNN autotuning) | ~seconds (neuronx-cc compilation) |
-| **Subsequent calls** | Instant (from cache) | Instant (from NEFF cache) |
-
-This is why the first forward pass is always slow — the device is compiling kernels. After that, compiled kernels are cached and reused.
-
-```python
-# Warmup: pay the one-time compilation cost
-with torch.no_grad():
-    _ = model(**inputs)
-torch.cuda.synchronize()  # or just wait on Neuron
-
-# NOW measure steady-state performance
+```none
+Dispatch only:   36.3ms
+With sync:     1950.5ms
 ```
 
-### Why fusion matters (revisited)
+Python returned in 36ms. The actual matmul took nearly 2 seconds. Without `synchronize()`, you'd think your 4096×4096 matmul runs in 36ms — it doesn't. You're just measuring how fast the runtime can *accept* work.
 
-Since data stays on-device, the bottleneck between ops is not CPU↔device transfer. It's **device memory bandwidth** — reading and writing intermediate results between ops:
-
-```
-Without fusion (5 ops):
-  matmul → write result to device memory → read it back →
-  scale  → write → read →
-  mask   → write → read →
-  softmax→ write → read →
-  matmul → write final result
-
-With fusion (1 op: scaled_dot_product_attention):
-  Load Q,K,V ONCE → do everything in fast on-chip SRAM → write result ONCE
-```
-
-5 round-trips to device memory → 1 round-trip. Same math. Much less memory traffic. This is true on GPU, Neuron, and any accelerator with a memory hierarchy.
+This matters for:
+- **Benchmarking** — always synchronize before taking timestamps
+- **Profiling** — CPU time ≠ device time
+- **Pipelining** — Python can queue the next op while the current one is still running on hardware
 
 ---
 
@@ -460,7 +517,7 @@ ESM-2("FVNQHLCGSHLVEALYLVCGERGFFYTPKT")
                │
      ┌─────────┼─────────┐
      ▼         ▼         ▼
-aten::matmul  aten::softmax  aten::masked_fill  ...
+aten::matmul  aten::softmax  aten::addmm  ...
      │         │         │
      ▼         ▼         ▼
 ┌──────────────────────────────────┐
@@ -468,21 +525,19 @@ aten::matmul  aten::softmax  aten::masked_fill  ...
 │  Checks: device? dtype? layout?  │
 └──────────────┬───────────────────┘
                │
-┌──────────────┼──────────────────────────────┐
-│              │              │                │
-▼              ▼              ▼                ▼
-MKL          cuBLAS        Neuron           Metal
-(CPU)        (CUDA)        (NKI)           (Apple)
-│              │              │                │
-▼              ▼              ▼                ▼
-x86 asm      PTX/SASS       NEFF           GPU shader
+               ▼
+         Neuron backend
+               │
+               ▼
+     Compile → NEFF → Execute
+     (first)   (cached)
 ```
 
-**Fusion** collapses multiple ops into one *before* dispatching:
-`[matmul + mask + softmax + matmul]` → `[scaled_dot_product_attention]`
+What we've established:
+- **Eager mode**: Python executes ops one at a time. No graph, no global optimization.
+- **Dispatch**: same `aten::mm` call routes to different backends depending on device.
+- **Compilation**: Neuron JIT-compiles each op into a NEFF on first encounter, then caches it.
+- **Async execution**: Python queues work and returns immediately; the hardware runs behind.
+- **Fusion**: collapsing multiple ops into one reduces kernel launches and memory traffic.
 
 **Your model code never changes.** Only the dispatch target does. That's the abstraction. That's why "just change the device" works.
-
----
-
-*Next: [Chapter 2](ch02-tensors) — What ARE these tensors that the ops operate on? Memory layout, strides, and why it matters for performance.*

@@ -6,7 +6,7 @@ That's what a **tensor** is in PyTorch: a view into a block of memory, plus the 
 
 ---
 
-## Act 1: What a tensor actually is
+## What is a tensor?
 
 Let's look at ESM-2's embedding table — the lookup table that converts amino acid tokens into 1280-dimensional vectors:
 
@@ -48,7 +48,7 @@ The data pointer gives the starting address. The shape describes logical dimensi
 
 ---
 
-## Act 2: Strides 
+## Strides 
 
 Memory is flat. A 2D tensor is a human concept. The hardware sees a linear sequence of bytes. Strides tell you how to convert a logical index `[i, j]` into a physical memory offset:
 
@@ -95,7 +95,7 @@ Why does this matter? Because hardware reads memory in **chunks**. When you acce
 
 ---
 
-## Act 3: Views — zero-cost reshaping
+## Views — zero-cost reshaping
 
 Here's where tensors diverge from arrays. Many operations that *look* like they create new data actually just create a new **view** — a different set of (shape, strides, offset) pointing at the same memory:
 
@@ -127,7 +127,7 @@ Strides: (1, 1280)
 Same memory: True
 ```
 
-`.T` didn't move a single byte. It just swapped the strides: what was stride `(1280, 1)` became `(1, 1280)`. Both tensors are just different *views* of the same underlying storage:
+`.T` didn't move a single byte. It just swapped the strides: what was stride `(1280, 1)` became `(1, 1280)`. Both tensors are just different *views* of the same underlying storage. The "rows" of the transposed tensor are the columns of the original — and they're spaced 1 element apart in memory, while the "columns" of the transposed tensor are spaced 1280 apart.
 
 ```
   embed                         embed.T
@@ -142,17 +142,14 @@ Same memory: True
               ┌───────────────────┐
               │  Storage          │
               │  [42,240 floats]  │
-              │  device=cpu       │
               └───────────────────┘
 ```
 
-The "rows" of the transposed tensor are the columns of the original — and they're spaced 1 element apart in memory, while the "columns" of the transposed tensor are spaced 1280 apart.
 
-This is free. But there's a catch.
 
 ---
 
-## Act 4: Contiguity
+## The importancew of contiguity
 
 A tensor is **contiguous** when its strides match what you'd expect from its shape — i.e., elements are laid out in memory in the "natural" row-major order. Our original embedding is contiguous. The transpose is not:
 
@@ -168,7 +165,7 @@ embed.T contiguous: False
 
 Why does this matter? Because kernels load data from device memory (HBM) into fast on-chip SRAM via DMA transfers that operate on **contiguous address ranges**. One DMA instruction says "starting at address X, copy N consecutive bytes." If your tensor is contiguous, that's one burst. If it's non-contiguous — say, a transpose where consecutive logical elements are 1280 floats apart — the hardware must issue separate transfers for each row, wasting bandwidth.
 
-This applies on both GPU (where contiguous data streams efficiently through the cache hierarchy) and Neuron (where DMA loads tiles from HBM into SBUF). We'll see the hardware details in Chapter 4.
+This applies on any accelerator including Neuron (where DMA loads tiles from HBM into SBUF). We'll see the hardware details in Chapter 4.
 
 When you call `.reshape()` on a non-contiguous tensor, PyTorch must allocate new memory and copy:
 
@@ -200,13 +197,16 @@ The rule:
 
 ---
 
-## Act 5: The ESM-2's attention matrices example
+### The impact of layouts on performance experiment
 
 Let's look at where layout matters in practice. Run a forward pass and grab the attention weights:
 
 ```python
-from transformers import EsmTokenizer
+import torch
+from transformers import EsmTokenizer, EsmModel
+
 tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
+model = EsmModel.from_pretrained("facebook/esm2_t33_650M_UR50D", attn_implementation="eager")
 
 inputs = tokenizer("FVNQHLCGSHLVEALYLVCGERGFFYTPKT", return_tensors="pt")
 with torch.no_grad():
@@ -239,7 +239,6 @@ But what if you wanted all heads' attention for position 5 attending to position
 across_heads = attn[0, :, 5, 10]  # shape: [20]
 print(f"Strides: {across_heads.stride()}")
 ```
-
 ```
 Strides: (1024,)
 ```
@@ -248,20 +247,74 @@ PyTorch reports this 1D tensor as "contiguous" (a 1D tensor is trivially contigu
 
 This is why attention implementations carefully choose which dimension to parallelize over. Parallelizing over heads (dim 1) gives each thread a contiguous seq×seq block. Parallelizing over sequence positions would give each thread scattered data.
 
+Here we create two tensors with the exact same values and shape, but different memory layouts — then benchmark the same matmul:
+
+```python
+import torch, time
+
+device = "neuron"
+
+# Create a non-contiguous tensor via slicing
+big = torch.randn(1024, 2048, device=device, dtype=torch.bfloat16)
+A_noncontig = big[:, ::2]                  # shape [1024, 1024], stride=(2048, 2)
+A_contig = A_noncontig.contiguous()        # shape [1024, 1024], stride=(1024, 1)
+
+B = torch.randn(1024, 1024, device=device, dtype=torch.bfloat16)
+
+print(f"Same values: {torch.equal(A_contig, A_noncontig)}")
+print(f"A_contig    stride: {A_contig.stride()}")
+print(f"A_noncontig stride: {A_noncontig.stride()}")
+
+# Warmup
+for _ in range(3):
+    _ = torch.mm(A_contig, B)
+    _ = torch.mm(A_noncontig, B)
+torch.neuron.synchronize()
+
+# Benchmark
+torch.neuron.synchronize()
+start = time.time()
+for _ in range(100):
+    _ = torch.mm(A_contig, B)
+torch.neuron.synchronize()
+t_contig = (time.time() - start) / 100
+
+torch.neuron.synchronize()
+start = time.time()
+for _ in range(100):
+    _ = torch.mm(A_noncontig, B)
+torch.neuron.synchronize()
+t_noncontig = (time.time() - start) / 100
+
+print(f"\nContiguous:     {t_contig*1000:.3f}ms")
+print(f"Non-contiguous: {t_noncontig*1000:.3f}ms")
+print(f"Ratio: {t_noncontig/t_contig:.2f}x")
+```
+
+```none
+Same values: True
+A_contig    stride: (1024, 1)
+A_noncontig stride: (2048, 2)
+
+Contiguous:     0.058ms
+Non-contiguous: 0.077ms
+Ratio: 1.33x
+```
+
+**33% slower** — same values, same shape, same operation. The non-contiguous stride forces the DMA engine to gather data with gaps instead of streaming it sequentially from HBM into on-chip memory. Multiply this by the hundreds of matmuls in ESM-2's 33 layers, and layout becomes a real performance factor.
+
 ---
 
-## Act 6: The memory hierarchy
+## The memory hierarchy on Neuron
 
 We've said "contiguous is faster" — but faster at what, exactly? At moving data through the memory hierarchy that every accelerator shares:
 
 ```
 ┌─────────────────────────────────────────────┐
 │  On-chip SRAM (fast, small, ~tens of MB)    │
-│  - GPU: shared memory / L1 cache            │
 │  - Neuron: SBUF (State Buffer) + PSUM       │
 ├─────────────────────────────────────────────┤
 │  Device memory (slow, large, ~tens of GB)   │
-│  - GPU: HBM                                 │
 │  - Neuron: HBM                              │
 └─────────────────────────────────────────────┘
 ```
@@ -272,7 +325,7 @@ This connects back to Chapter 1's fusion story. Fusion eliminates *inter-kernel*
 
 ---
 
-## Act 7: The dispatcher cares about layout
+## The dispatcher cares about layout
 
 Back in Chapter 1, we said the dispatcher routes ops based on device and dtype. There's a third axis: **layout**.
 
@@ -295,13 +348,12 @@ The dispatcher uses (device, dtype, layout) as a triple to select the right kern
 
 ```
 torch.mm(A, B)
-  ├── device=cuda, layout=strided  → cuBLAS GEMM
-  ├── device=cuda, layout=sparse   → cuSPARSE SpMM
-  ├── device=cpu,  layout=strided  → MKL/OpenBLAS GEMM
-  └── device=neuron, layout=strided → NEFF matmul kernel
+  ├── device=cpu,    layout=strided  → Intel MKL GEMM (AVX-512)
+  ├── device=neuron, layout=strided  → Compile to NEFF → execute on NeuronCore tensor engine
+  └── device=neuron, layout=sparse   → fallback to CPU (not yet supported)
 ```
 
-We'll see this concretely in Chapter 10 when we bring PyTorch Geometric's sparse operations to Neuron — the dispatcher must find (or fall back from) kernels for sparse layouts on the Neuron device.
+The dispatcher routes based on device *and* layout. On Neuron, strided (dense) tensors compile to efficient NEFFs. Sparse layouts currently fall back to CPU — the data moves across the bus, runs on MKL, and the result moves back. We'll see this concretely in Chapter 6 when we look at fallback behavior.
 
 ---
 
@@ -335,4 +387,3 @@ But in eager mode, each kernel makes its own local decision about layout. No ker
 *What if something could see the whole graph of operations and choose layouts globally?*
 
 That's the compiler. Chapter 3.
-````
