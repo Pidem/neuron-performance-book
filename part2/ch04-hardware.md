@@ -1,12 +1,12 @@
 # Hardware deep dive
 
-In Chapter 3, we ended with: "The compiler generates machine code. In this chapter, we will dive deep into the chip architecture choices made by Neuron. 
+In Chapter 3, we saw the compiler collapse 1,050 NEFFs into one. But what hardware does that NEFF actually run on? In this chapter, we dive into the NeuronCore architecture.
 
 ---
 
-## The GPU mental model (brief)
+## The GPU mental model
 
-If you're coming from CUDA, here's what you're used to:
+If you're coming from the CUDA world, here's what you're used to:
 
 - **Many small SMs** (Streaming Multiprocessors), each running warps of 32 threads
 - **SIMT model:** thousands of independent threads execute the same instruction
@@ -64,151 +64,285 @@ Inside a single NeuronCore-v3: specialized engines connected by on-chip SRAM (SB
 
 ---
 
-## Seeing the engines in action
+## From Python to hardware: a first-principles walkthrough
 
-Theory is nice. Let's prove it. Let's profile four isolated ops on our trn2.3xlarge and measure which engine the hardware actually uses:
+Let's trace a concrete function through the chip. Consider the following fictional layer consisting of three matmuls, one layer normalization, and one activation function:
 
 ```python
-import torch, os, glob, shutil
+def big_simple(x, w1, w2, w3):
+    x = torch.matmul(x, w1)              
+    x = torch.layer_norm(x, [4096])      
+    x = torch.matmul(x, w2)              
+    x = torch.nn.functional.gelu(x)      
+    x = torch.matmul(x, w3)              
+    return x
+
+x = torch.randn(1024, 4096, device="neuron", dtype=torch.bfloat16)
+w1 = torch.randn(4096, 4096, device="neuron", dtype=torch.bfloat16)
+w2 = torch.randn(4096, 4096, device="neuron", dtype=torch.bfloat16)
+w3 = torch.randn(4096, 4096, device="neuron", dtype=torch.bfloat16)
+
+compiled = torch.compile(big_simple, backend="neuron")
+```
+
+### Step 1: What does this function actually compute?
+
+| Line | Math | What kind of operation? |
+|------|------|------------------------|
+| `matmul(x, w1)` | X × W₁ | Multiply-accumulate: for each output element, dot 4096 pairs and sum |
+| `layer_norm(x)` | (x - μ) / √(σ² + ε) | Reduce (mean), subtract, square, reduce (variance), rsqrt, scale |
+| `matmul(x, w2)` | X × W₂ | Same as first matmul |
+| `gelu(x)` | x · 0.5 · (1 + erf(x/√2)) | Polynomial approximation, then element-wise multiply |
+| `matmul(x, w3)` | X × W₃ | Same as first matmul |
+
+### Step 2: Map each primitive to an engine
+
+Each of these primitives needs to run on specific hardware. Let's think through the mapping:
+
+**Matrix multiplication** is a large number of multiply-accumulate operations. This is the most common operation in modern AI, so NeuronCore has a dedicated 128×128 systolic array purpose-built for it — the Tensor engine. The full 4096×4096 matrix doesn't fit in the array at once, so the compiler breaks it into 128×128 tiles and processes them sequentially.
+
+**Reductions and element-wise math** (the subtract, multiply, and sum operations inside layer_norm) operate on vectors of values. The Vector engine handles these with 128-wide SIMD — it processes 128 elements per cycle in parallel.
+
+**Transcendental functions** like rsqrt and erf can't be computed with simple arithmetic. The Scalar engine has dedicated piecewise polynomial hardware — essentially lookup tables with interpolation — that approximate these functions efficiently.
+
+**Data movement** between HBM (where your tensors live) and SBUF (where engines read from) is handled by 32 parallel DMA engines. They operate on contiguous chunks and can run concurrently with compute.
+
+Putting it together:
+
+| Primitive operation | Engine | Why |
+|---|---|---|
+| Dot product (multiply-accumulate) | **Tensor** | 128×128 systolic array |
+| Reduce (sum across a dimension) | **Vector** | 128-wide SIMD partial sums |
+| Subtract, multiply (element-wise) | **Vector** | 128-wide SIMD |
+| rsqrt, erf (transcendentals) | **Scalar** | Polynomial lookup tables |
+| Move tiles HBM ↔ SBUF | **DMA** | 32 parallel engines |
+
+So our 5-line function decomposes like this:
+
+```
+matmul(x, w1)     →  DMA: load W₁ tiles from HBM → SBUF
+                      Tensor: LDWEIGHTS (fill systolic array with W₁ tile)
+                      Tensor: MATMUL (stream X tiles through, accumulate in PSUM)
+                      ... repeated for each 128×128 tile pair
+
+layer_norm(x)     →  Vector: REDUCE (sum all elements → compute mean)
+                      Vector: TENSOR_TENSOR SUBTRACT (x - mean)
+                      Scalar: ACTIVATE SQUARE (compute (x - mean)²)
+                      Vector: REDUCE (sum squares → compute variance)
+                      Scalar: TENSOR_SCALAR RSQRT (1 / √variance)
+                      Vector: MULTIPLY (normalize)
+
+matmul(x, w2)     →  same pattern as first matmul
+
+gelu(x)           →  Scalar: ACTIVATE (polynomial approximation of erf)
+                      Vector: MULTIPLY (x × Φ(x))
+
+matmul(x, w3)     →  same pattern as first matmul
+```
+
+### Step 3: The problems the compiler must solve
+
+The compiler can't just execute these sequentially — it must orchestrate parallelism:
+
+**Tiling.** A 4096×4096 weight matrix in bfloat16 is 32 MB. SBUF is ~28 MB per core. The entire matrix doesn't fit at once. The compiler breaks it into 128×128 tiles (32 KB each) and processes them in sequence, loading the next tile while computing the current one.
+
+**Pipelining.** While the tensor engine multiplies tile N, DMA loads tile N+1 into a different SBUF bank. This hides memory latency — the tensor engine never waits for data (ideally).
+
+**Multi-core split.** The compiler splits your 1024 rows across 2 NeuronCores: nc0 handles rows 0–511, nc1 handles rows 512–1023. Both cores execute the same instruction sequence in parallel. This is why Neuron Explorer shows two of everything (Tensor nc0, Tensor nc1, etc.).
+
+**Synchronization.** The engines run concurrently but have data dependencies — you can't normalize before the matmul finishes. The compiler inserts **semaphores** (hardware counters) that gate instructions: "don't start this SUBTRACT until the REDUCE has completed 55 iterations." You'll see these as `S[4] (Scalar)>=55` in the profiler tooltips.
+
+**Weight loading.** The tensor engine has a **weight-stationary** design with a dual weight cache. While the current matmul runs using the "foreground" weights, the DMA loads the next weight tile into the "background" slot. When the current tile finishes, foreground and background swap instantly — no stall.
+
+### Step 4: Seeing it in Neuron Explorer
+
+Let's compile and profile this function, then open the result in Neuron Explorer:
+
+```python
+import os, torch, shutil, glob
 from torch.profiler import profile, ProfilerActivity
 from torch_neuronx.profiling import NeuronConfig, ProfileMode, NeuronProfiler
 
 os.environ["NEURON_RT_NUM_CORES"] = "1"
-
 device = "neuron"
-profile_dir = "./experiment_engine_activation"
-neff_cache = f"{profile_dir}/neff_cache"
-
+profile_dir = "/workshop/profile_simple"
 os.system(f"rm -rf {profile_dir}")
-os.environ["TORCH_NEURONX_NEFF_CACHE_DIR"] = neff_cache
 
-def profile_op(name, op_fn, warmup_fn):
-    """Profile a single op and copy NEFFs into the session directory."""
-    out_dir = f"{profile_dir}/{name}"
+def big_simple(x, w1, w2, w3):
+    x = torch.matmul(x, w1)
+    x = torch.layer_norm(x, [4096])
+    x = torch.matmul(x, w2)
+    x = torch.nn.functional.gelu(x)
+    x = torch.matmul(x, w3)
+    return x
 
-    # Warmup populates the NEFF cache
-    warmup_fn()
+x = torch.randn(1024, 4096, device=device, dtype=torch.bfloat16)
+w1 = torch.randn(4096, 4096, device=device, dtype=torch.bfloat16)
+w2 = torch.randn(4096, 4096, device=device, dtype=torch.bfloat16)
+w3 = torch.randn(4096, 4096, device=device, dtype=torch.bfloat16)
+
+compiled = torch.compile(big_simple, backend="neuron")
+
+# Warmup (triggers compilation)
+with torch.no_grad():
+    for _ in range(3):
+        _ = compiled(x, w1, w2, w3)
+torch.neuron.synchronize()
+
+# Profile
+config = NeuronConfig(
+    modes=[ProfileMode.DEVICE, ProfileMode.RUNTIME],
+    profile_output_dir=profile_dir,
+    capture_enabled_for_nc="0",
+)
+exporter = NeuronProfiler(config)
+
+with profile(
+    activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1],
+    experimental_config=config,
+    on_trace_ready=exporter.export_trace,
+) as prof:
+    with torch.no_grad():
+        _ = compiled(x, w1, w2, w3)
     torch.neuron.synchronize()
 
-    config = NeuronConfig(
-        modes=[ProfileMode.DEVICE, ProfileMode.RUNTIME],
-        profile_output_dir=out_dir,
-        capture_enabled_for_nc="0",
-    )
-    exporter = NeuronProfiler(config)
-
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1],
-        experimental_config=config,
-        on_trace_ready=exporter.export_trace,
-    ) as prof:
-        op_fn()
-        torch.neuron.synchronize()
-
-    # neuron-explorer needs .neff files alongside .ntff files to decode traces
-    ntff_files = glob.glob(f"{out_dir}/**/*.ntff", recursive=True)
-    if ntff_files:
-        session_dir = os.path.dirname(ntff_files[0])
-        for neff in glob.glob(f"{neff_cache}/**/*.neff", recursive=True):
-            shutil.copy2(neff, session_dir)
-
-# Setup tensors
-a = torch.randn(1024, 1024, device=device, dtype=torch.bfloat16)
-b = torch.randn(1024, 1024, device=device, dtype=torch.bfloat16)
-z = torch.randn(4096, 4096, device=device, dtype=torch.bfloat16)
-
-profile_op("tensor_matmul",
-    op_fn=lambda: [torch.matmul(a, b) for _ in range(5)],
-    warmup_fn=lambda: [torch.matmul(a, b) for _ in range(3)])
-
-profile_op("vector_sum",
-    op_fn=lambda: [torch.sum(a, dim=-1) for _ in range(5)],
-    warmup_fn=lambda: [torch.sum(a, dim=-1) for _ in range(3)])
-
-profile_op("scalar_gelu",
-    op_fn=lambda: [torch.nn.functional.gelu(a) for _ in range(5)],
-    warmup_fn=lambda: [torch.nn.functional.gelu(a) for _ in range(3)])
-
-profile_op("dma_clone",
-    op_fn=lambda: [z.clone() for _ in range(5)],
-    warmup_fn=lambda: [z.clone() for _ in range(3)])
+# Copy NEFFs so Neuron Explorer can decode traces
+neff_cache = os.environ.get("TORCH_NEURONX_NEFF_CACHE_DIR", "/tmp/neff_cache")
+ntff_files = glob.glob(f"{profile_dir}/**/*.ntff", recursive=True)
+if ntff_files:
+    session_dir = os.path.dirname(ntff_files[0])
+    for neff in glob.glob(f"{neff_cache}/**/*.neff", recursive=True):
+        shutil.copy2(neff, session_dir)
 ```
 
-View the results with `neuron-explorer`:
+Now open the output in the **Neuron Explorer**: In VSCode open `>Neuron Explorer: open profile manager`, give your profile a unique name, click on `Upload Profile`, select a directoy upload and point the `profile_dir` and select your python script as the source code which will allow neuron explorer to map the profile with specific pytorch instructions. 
 
+alternatively, you can pen the profile through the CLI and port-forwarding. 
 ```bash
-neuron-explorer view -d ./experiment_engine_activation/tensor_matmul --output-format summary-text 2>&1 | grep -E "engine_active_time_percent|dma_active_time_percent|matmul_instruction"
-neuron-explorer view -d ./experiment_engine_activation/vector_sum --output-format summary-text 2>&1 | grep -E "engine_active_time_percent|dma_active_time_percent|matmul_instruction"
-neuron-explorer view -d ./experiment_engine_activation/scalar_gelu --output-format summary-text 2>&1 | grep -E "engine_active_time_percent|dma_active_time_percent|matmul_instruction"
-neuron-explorer view -d ./experiment_engine_activation/dma_clone --output-format summary-text 2>&1 | grep -E "engine_active_time_percent|dma_active_time_percent|matmul_instruction"
+neuron-explorer view -d /workshop/profile_simple --port 3001 --display-name simple
 ```
 
-Here's what the hardware reported:
+We'll use Neuron Explorer extensively in Part III (Chapters 9-10) to build roofline models and diagnose bottlenecks.
 
-| Engine | `matmul` | `sum` | `gelu` | `clone` |
-|--------|----------|-------|--------|---------|
-| **Tensor** | **17.1%** | 3.1% | 1.2% | 1.5% |
-| **Vector** | 2.7% | **5.4%** | **25.7%** | 1.2% |
-| **Scalar** | 11.6% | 2.9% | **20.3%** | 1.1% |
-| **DMA** | **13.0%** | 5.8% | 2.6% | **29.2%** |
-| matmul instructions | **960** | 10 | 0 | 0 |
+#### The System Timeline
 
-The story:
+```{figure} ../assets/ne-ex1-systemtimeline.png
+:alt: System Timeline showing the full execution
+:width: 800px
+:align: center
 
-- **matmul** → tensor engine dominant, DMA feeding it data, 960 matmul instructions executed
-- **sum** → vector engine highest — reducing 1024 elements per row is a SIMD reduction
-- **gelu** → vector (25.9%) + scalar (20.4%) — *not* what you'd naively expect
-- **clone** → DMA dominant (29.2%), compute engines nearly idle — pure data movement
-
-```{admonition} GELU isn't "scalar" — the compiler is smarter than you think
-:class: tip
-We expected GELU (an element-wise activation) to be scalar-dominated. Instead, the compiler vectorized the polynomial approximation (`x * 0.5 * (1 + tanh(...))`) into 128-wide SIMD operations on the vector engine. This is why you **measure, not assume**. The engine assignment isn't always intuitive.
+The System Timeline: PyTorch compiles the graph (row 2), then a single NEFF executes on two NeuronCores in parallel (pink blocks, rows 5-6).
 ```
 
-```{admonition} Why is total utilization low?
-:class: note
-The individual op profiles show low total utilization (16-29%) because we're profiling single ops in eager mode — each op compiles its own tiny NEFF, dispatches, and returns. The overhead between ops dwarfs the compute. This is exactly why `torch.compile` gives 8× speedup (Chapter 3): it eliminates the between-op overhead and keeps the engines busy continuously.
+The System Timeline reads top to bottom:
+1. **framework/TID:0** — the main Python thread, active for the entire call
+2. **framework/TID** (second row) — the `torch.compile` dispatch: Dynamo captures the graph, hands it to the Neuron backend
+3. **framework/Stream:0** — the compiled NEFF executing as one continuous block
+4. **neuron_rt/NC:0** — runtime setup (memory allocation, NEFF submission) then waiting for hardware
+5. **neuron_hw/NC0:4, NC0:5** — two physical NeuronCores executing in parallel
+
+Double-click on one of the pink `nc_exec_running` blocks to open the Device Timeline.
+
+#### The Device Timeline
+
+The Device Timeline shows what happens *inside* the NeuronCore during execution. Click and drag to select a region of interest — the view will zoom into that time window.
+
+```{figure} ../assets/ne-ex1-devicetimeline.png
+:alt: Device Timeline showing engine-level activity
+:width: 800px
+:align: center
+
+The Device Timeline: each row is a hardware engine. The execution splits into three visible "waves" corresponding to our three matmuls.
+```
+
+Every engine is duplicated (nc0, nc1) because the compiler split work across 2 NeuronCores. Reading the timeline left to right, you can see three distinct phases:
+
+**Wave 1 (0–300,000 ns): First matmul.** The Tensor rows show dense activity — DMA engines are loading weight tiles while the systolic array computes `matmul(x, w1)`. The TensorMatrix rows show individual matmul instructions tightly packed.
+
+**Wave 2 (~300,000–320,000 ns): Layer norm.** The Tensor engine goes quiet. Vector and Scalar engines take over — computing mean, variance, rsqrt, and normalization. This is the gap between the first and second matmul bursts.
+
+**Wave 3 (~320,000 ns–end): Second matmul, GELU, and third matmul.** The compiler is smart here: it interleaves the GELU activation with the second matmul's output tiles and the third matmul's weight loading. Rather than waiting for all of `matmul(x, w2)` to complete before starting GELU, the compiler pipelines them — you'll see Vector/Scalar activity overlapping with Tensor activity in this region.
+
+#### Hovering: tracing instructions back to Python
+
+Hover over any block in the Device Timeline to see exactly what hardware instruction it represents and which line of Python generated it:
+
+```{figure} ../assets/ne-ex1-matmul.png
+:alt: Hovering over a MATMUL instruction
+:width: 800px
+:align: center
+
+A MATMUL instruction on the TensorMatrix engine — traced back to `test.py:13` (our first `torch.matmul` call). Shows the tile dimensions, duration, and source location.
+```
+
+```{figure} ../assets/ne-ex1-vector-tensor.png
+:alt: Hovering over a TENSOR_TENSOR SUBTRACT instruction
+:width: 800px
+:align: center
+
+A TENSOR_TENSOR SUBTRACT on the Vector engine — part of layer_norm's `x - mean` computation, traced to `test.py:14`.
+```
+
+```{figure} ../assets/ne-ex1-scalar-activate.png
+:alt: Hovering over an ACTIVATE instruction
+:width: 800px
+:align: center
+
+An ACTIVATE instruction on the Scalar engine — the polynomial approximation inside GELU, traced to `test.py:16`.
+```
+
+#### Memory usage
+
+```{figure} ../assets/ne-ex1-memusage.png
+:alt: State Buffer and PSUM usage over time
+:width: 800px
+:align: center
+
+State Buffer (SBUF) and PSUM usage. The sawtooth pattern in PSUM shows accumulation during matmuls followed by drain when results write back to SBUF.
+```
+
+The memory rows at the bottom confirm the tiling strategy:
+- **State Buffer Usage** oscillates as weight tiles load in and get consumed
+- **PSUM Usage** spikes during matmul accumulation (partial products building up), then drops when results are written back to SBUF for the next operation
+
+```{admonition} The key insight
+:class: important
+Five lines of Python became a choreography across 2 NeuronCores × (32 DMA engines + Tensor + Vector + Scalar + GpSimd), all running concurrently with semaphore synchronization. The compiler did this automatically — from `torch.compile`, we went from Python to hardware instructions with full source-level traceability.
 ```
 
 ---
 
-## Why scatter falls back — the architecture explains it
+## Neuron architectural choices and tradeoff 
 
-In Chapter 3 we discovered that `torch.scatter` silently falls back to CPU (8.9× slower than a native matmul). Now we can explain *why*:
-
-- **GPU:** hardware atomicAdd in the memory controller makes scatter work natively. Each thread writes to a random destination; atomics serialize conflicts. Thousands of other threads keep the hardware busy while some stall.
-- **Neuron:** no atomic units. No random-access write hardware. DMA only does contiguous bulk transfers. There is physically no circuit on the chip that can do `output[random_index] += value`.
-
-The tradeoff is deliberate: Neuron bets that **95% of ML compute is matmul-shaped**. The die area that would have gone to atomic units instead went to a larger systolic array (667 TFLOPS at BF16). For the 5% of ops that need scatter/gather semantics, the runtime falls back to CPU.
-
-```{admonition} The EquiformerV3 story
-:class: note
-The EquiformerV3 model (equivariant GNN for molecular simulations) has 5 ops that fall back to CPU: `scatter_reduce`, `atan2`, `linalg_cross`, `acos`, and `uniform_`. The model still *runs correctly* — but the PCIe round-trips make it 87× slower than running entirely on CPU. In Part V, we'll write NKI kernels to solve some of these on-chip.
-```
+Neuron makes a deliberate tradeoff: It bets that **95% of ML compute is matmul-shaped**: Most of the die area is allocated the to larger systolic arrays, so when you have layer operations that have more exotic memory access patterns, it can be more challenging to support them well (think scatter_reduce, etc.)
 
 ---
-
-## The one rule
+## Engineering Principles
 
 > **Keep the tensor engine always doing matmuls. Everything else is auxiliary data movement.**
 
 This single principle explains most of Neuron performance engineering:
 
 - **Why `torch.compile` helps** (Chapter 3): it fuses all the small vector/scalar ops between matmuls so the tensor engine never stalls waiting for data
-- **Why contiguity matters** (Chapter 2): DMA engines transfer contiguous blocks fastest — strided access slows the trucks that feed the tensor engine
+- **Why contiguity matters** (Chapter 2): DMA engines transfer contiguous blocks fastest — strided access slows the data movement that feed the tensor engine
 - **Why memory hierarchy matters** (Chapter 8): the DMA engines' job is to keep SBUF fed so the tensor engine never idles
 - **Why collectives are "free"** (Chapter 17): the 16 CC-Cores run independently of compute — communication overlaps computation at zero cost
 
 The critical arithmetic intensity: **667 TFLOPS ÷ 2.9 TB/s ≈ 230 ops/byte**. If your operation does fewer than 230 FLOPs per byte loaded from HBM, it's memory-bound — the tensor engine is waiting for data. If more, it's compute-bound — the ideal state.
 
-A 1024×1024 BF16 matmul has arithmetic intensity ~512 ops/byte — solidly compute-bound. A vector sum has intensity ~1 op/byte — hopelessly memory-bound. This is why the profiler showed matmul at 16% tensor engine utilization but sum at only 5% vector — the sum is bottlenecked on data movement, not compute.
+A 1024×1024 BF16 matmul has arithmetic intensity ~512 ops/byte — solidly compute-bound. A vector sum has intensity ~1 op/byte — hopelessly memory-bound. 
 
 ```{seealso}
 For detailed NeuronCore-v3 engine specifications and the full Trn2 instance architecture, see the [Neuron SDK documentation](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trainium2.html).
 ```
-
 ---
 
-*Question raised → "OK, but how does my PyTorch code actually get to these engines?"*
+## When the compiler isn't enough
 
-*Next: [Chapter 5](ch05-pytorch-native) — PyTorch Native on Neuron.*
+The Neuron compiler handles the common cases well — matmuls, layer norms, attention patterns. But some operations have no native implementation, and some algorithms need tighter control over how data moves through SBUF and PSUM than the compiler can provide.
+
+When you hit that wall, an unsupported op falling back to CPU, a novel recurrence like DeltaNet or Mamba2, or a fusion pattern the compiler misses, you write directly to the hardware using **NKI (Neuron Kernel Interface)**. NKI gives you explicit control over DMA scheduling, engine assignment, and tile layout. You become the compiler.
+
+That's Part V of this book. For now, know that the engines and memory hierarchy we just explored are exactly what you'll be programming against.
+
+

@@ -149,7 +149,7 @@ Same memory: True
 
 ---
 
-## The importancew of contiguity
+## The importance of contiguity
 
 A tensor is **contiguous** when its strides match what you'd expect from its shape — i.e., elements are laid out in memory in the "natural" row-major order. Our original embedding is contiguous. The transpose is not:
 

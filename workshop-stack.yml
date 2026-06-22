@@ -20,7 +20,7 @@ Parameters:
   CapacityReservationId:
     Description: Capacity Block reservation ID (e.g. cr-0abc123). Leave empty for on-demand.
     Type: String
-    Default: 'cr-01a3398d1c237536c'
+    Default: 'cr-0293d4046623a3197'
   KeyPairName:
     Description: EC2 Key Pair for SSH access (enables SSH tunnel for Neuron Explorer on ports 3001/3002). Leave empty for no SSH.
     Type: String
@@ -821,6 +821,10 @@ Resources:
                   install_extension "ms-toolsai.jupyter" || exit 1
                   install_extension "ms-vscode.live-server" || exit 1
                   install_extension "synedra.auto-run-command" || exit 1
+                  # Neuron Explorer not on Open VSX - install from local VSIX
+                  VSIX_PATH="/tmp/neuron-explorer.vsix"
+                  aws s3 cp s3://cf-templates-pidemal-ap-southeast-4/neuron-explorer-extension/amazonwebservices.neuron-explorer-2.30.0.vsix "$VSIX_PATH"
+                  sudo -u ${CodeEditorUser} --login code-editor-server --install-extension "$VSIX_PATH" --force || exit 1
                 - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
                 - echo "Code Editor installed. Checking configuration"
                 - !Sub sudo -u ${CodeEditorUser} --login code-editor-server -v

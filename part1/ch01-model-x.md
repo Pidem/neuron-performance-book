@@ -1,6 +1,8 @@
 # What actually happens when you call `model(x)`
 
-## Act 1: Running ESM-2 with PyTorch
+If you are reading this book, chances are that you have written `model(x)` thousands of times. You know it runs a forward pass, but do you understand the machinery? Which runtime activates? What work gets scheduled on hardware? Most ML engineers treat this as a black box, and often times, you might actually get away with that. But to really understand how to make the best use of your accelerator, you will need to understand the machinery in more details: The best software is written when it's tailor-made for the hardware. This is especially true for accelerator chips such as Neuron. 
+
+## Example: Running ESM-2 with PyTorch
 
 Let's start with a real protein language model and see what it actually *does* when we call it.
 
@@ -67,9 +69,31 @@ for e in sorted(events, key=lambda e: e.cpu_time_total, reverse=True)[:10]:
 ESM-2 (650M params, 33 layers) decomposes into just a handful of ATen ops repeated hundreds of times. These are operations such as additions, transposes, views, multiplications.
 ```
 
+Now let's move this to Neuron. The model code doesn't change — we just move the tensors:
+
+```python
+model_neuron = model.to("neuron")
+inputs_neuron = {k: v.to("neuron") for k, v in inputs.items()}
+
+with torch.no_grad():
+    output_neuron = model_neuron(**inputs_neuron)
+
+print(f"Output device: {output_neuron.last_hidden_state.device}")
+print(f"Output shape:  {output_neuron.last_hidden_state.shape}")
+print(f"Same result:   {torch.allclose(output.last_hidden_state, output_neuron.last_hidden_state.cpu(), atol=1e-3)}")
+```
+
+```none
+Output device: neuron:0
+Output shape:  torch.Size([1, 32, 1280])
+Same result:   True
+```
+
+Same model, and of course, same results: The only difference are those `aten::matmul` and `aten::softmax` calls now dispatch to the Neuron backend instead of MKL. The dispatcher  made that routing decision based solely on the tensor's device.
+
 ---
 
-## Act 2: PyTorch eager execution
+## PyTorch eager execution
 
 What does "eager" mean? Python executes your code line by line. Each operation runs *immediately* and returns a result. There is no "graph" being built. There is no compilation step.
 
@@ -146,7 +170,7 @@ Every indentation = a Python function call. Every ATen op = an immediate computa
 
 ---
 
-## Act 3: Naked attention — same ops, no framework magic
+## Naked attention — same ops, no framework magic
 
 What does a transformer layer actually compute? Strip away the HuggingFace wrapper, and ESM-2's attention is just 6 PyTorch operations: four linear projections (`addmm`), one matmul for attention scores, one softmax, and one matmul to combine values. That's it. Let's rebuild it from scratch to prove it:
 
@@ -220,7 +244,7 @@ Our 30-line class triggers the same ATen ops as the full 650M-parameter ESM-2. T
 
 ---
 
-## Act 4: The dispatcher — same op, different kernel
+## The dispatcher — same op, different kernel
 
 The dispatcher's job: given an operation + tensor metadata, pick the right implementation to run.
 
@@ -313,7 +337,7 @@ An accelerator can't run Python — it needs machine code specific to its hardwa
 
 ---
 
-## Act 5: Fusion — collapsing ops into one kernel
+## Operation fusion — collapsing ops into one kernel
 
 Some operation sequences appear so frequently in deep learning (attention being the prime example) that hardware vendors write a single optimized kernel for the entire sequence. Instead of dispatching 5 separate ops — each reading from and writing to HBM — the fused kernel does all the work in one shot, keeping intermediate results in fast on-chip memory.
 
