@@ -22,12 +22,12 @@ torch.matmul(A, B)      A.device == "neuron"
        │
        ▼
 ┌─────────────────┐
-│   Dispatcher     │    Checks device → finds PrivateUse1 registration
+│   Dispatcher    │    Checks device → finds PrivateUse1 registration
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Neuron backend  │    Compiles op → NEFF → executes on NeuronCore
+│ Neuron backend  │    Compiles op → NEFF → executes on NeuronCore
 └─────────────────┘
 ```
 
@@ -114,15 +114,19 @@ output = compiled_model(x)  # Entire graph compiled as one NEFF
 
 The compilation pipeline:
 1. **Dynamo** captures the Python execution into an FX graph of ATen ops
-2. **torch-MLIR** lowers the FX graph to Stable HLO (an intermediate representation)
-3. **neuronx-cc** compiles the HLO graph into a single optimized NEFF
-4. The NEFF is cached and reused on subsequent calls
+2. **AOTAutograd** functionalizes the graph (removes in-place ops, decomposes high-level operations like `linear` into primitive ATen ops like `mm` + `add`). This produces a pure, side-effect-free graph that compilers can reason about
+3. **torch-MLIR** lowers the functional graph to Stable HLO (an intermediate representation)
+4. **neuronx-cc** compiles the HLO graph into a single optimized NEFF
+5. The NEFF is cached and reused on subsequent calls
 
-```A
+```
 Python code
     │
     ▼ (Dynamo traces)
 FX Graph (DAG of ATen ops with shapes)
+    │
+    ▼ (AOTAutograd functionalizes)
+Functional ATen graph (no in-place ops, decomposed)
     │
     ▼ (torch-MLIR lowers)
 Stable HLO
@@ -229,7 +233,7 @@ torch.ops.my_namespace.my_op = my_kernel
 # Or use inside torch.compile — the compiler treats it as a custom op
 ```
 
-The pattern mirrors Triton: `nki.jit` ↔ `triton.jit`. Custom kernels participate in autograd (you can define backward passes), work in both eager and compiled modes, and can be reused across models. We'll write our first NKI kernel in Part V.
+The pattern mirrors Triton: `nki.jit` ↔ `triton.jit`. Custom kernels participate in autograd (you can define backward passes), work in both eager and compiled modes, and can be reused across models. When compiled with `torch.compile`, the NKI kernel and the surrounding model code are fused into a single NEFF — there's no separate dispatch or binary loading at runtime. We'll write our first NKI kernel in Part V.
 
 ---
 

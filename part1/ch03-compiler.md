@@ -283,6 +283,8 @@ seq_len=4 → 17.7s (first compilation)
 
 17.7 seconds — for a tiny 8M-parameter model with a 4-token input. That's the cost of NEFF compilation. Every new sequence length would trigger this again.
 
+When Dynamo captures a graph, it records **guards**: assumptions about tensor shapes, dtypes, devices, and even model structure. On subsequent calls, PyTorch checks all guards before reusing the compiled graph. If any guard fails (different sequence length, different batch size, model parameter changed), the graph is invalid and must be recompiled from scratch. This is why a single `torch.compile` call doesn't generalize across shapes — the NEFF was specialized to one set of assumptions.
+
 The solution on Neuron: **bucketing**. Pre-compile for a fixed set of sizes and pad inputs to the nearest bucket:
 
 ```python
@@ -386,4 +388,4 @@ The rest of this book helps you on this journey.
 Performance engineering on custom silicon, it gets easier.
 ```
 
-*Next: [Chapter 4](../part2/ch04-hardware) — The hardware landscape. What is a NeuronCore?*
+

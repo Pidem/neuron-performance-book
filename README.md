@@ -12,8 +12,35 @@ jupyter-book build .
 open _build/html/index.html
 ```
 
-## To deploy trn2 instance reach out to @pidemal
-run `workshop-stack.yml` and use the AMI provided by pierre. 
+## Deploy a trn2 instance
+
+1. Upload the Neuron Explorer extension to S3:
+   ```bash
+   aws s3 cp neuron-explorer-extension/amazonwebservices.neuron-explorer-2.30.0.vsix \
+     s3://cf-templates-pidemal-ap-southeast-4/neuron-explorer-extension/
+   ```
+
+2. Deploy the CloudFormation stack:
+   ```bash
+   AWS_PAGER="" aws cloudformation deploy \
+     --template-file workshop-stack.yml \
+     --stack-name neuron-workshop \
+     --capabilities CAPABILITY_IAM \
+     --region ap-southeast-4 \
+     --s3-bucket cf-templates-pidemal-ap-southeast-4 \
+     --s3-prefix cfn-templates
+   ```
+
+3. Get the Code Editor URL:
+   ```bash
+   aws cloudformation describe-stacks --stack-name neuron-workshop \
+     --region ap-southeast-4 --query "Stacks[0].Outputs[?OutputKey=='URL'].OutputValue" --output text
+   ```
+
+4. Activate the Python environment in the terminal:
+   ```bash
+   source /workshop/workspace/native_venv/bin/activate
+   ```
 
 ## Book Progress
 - [X] Intro 

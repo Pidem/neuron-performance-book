@@ -11,15 +11,15 @@ parts:
   - caption: "Part II: From GPU to Neuron"
     chapters:
       - file: part2/ch04-hardware
-      - file: part2/ch05-pytorch-native
-      - file: part2/ch06-eager-mode
-      - file: part2/ch07-torch-compile
-      - file: part2/ch08-memory-hierarchy
+      - file: part2/ch05-memory-hierarchy
+      - file: part2/ch06-pytorch-native
+      - file: part2/ch07-schnet-on-neuron
+      - file: part2/ch08-openclip-on-neuron
 
   - caption: "Part III: Measuring Before Optimizing"
     chapters:
-      - file: part3/ch09-profiler
-      - file: part3/ch10-roofline
+      - file: part3/ch09-roofline
+      - file: part3/ch10-profiler
 
   - caption: "Part IV: Precision & Numerics"
     chapters:
@@ -41,3 +41,4 @@ parts:
   - caption: Appendix
     chapters:
       - file: appendix/gpu-to-neuron-migration
+      - file: appendix/further-reading

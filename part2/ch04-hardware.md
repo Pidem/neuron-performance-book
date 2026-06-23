@@ -4,20 +4,9 @@ In Chapter 3, we saw the compiler collapse 1,050 NEFFs into one. But what hardwa
 
 ---
 
-## The GPU mental model
-
-If you're coming from the CUDA world, here's what you're used to:
-
-- **Many small SMs** (Streaming Multiprocessors), each running warps of 32 threads
-- **SIMT model:** thousands of independent threads execute the same instruction
-- **Tiny shared memory per SM** (~100-200 KB), massive parallelism compensates
-- **Hardware atomicAdd:** enables scatter — each thread writes to a random destination, atomics serialize conflicts. Works because thousands of other threads keep the hardware busy while some stall.
-
-The GPU bet: *throw enough threads at the problem and latency disappears.*
-
----
-
 ## The NeuronCore architecture
+
+If you're coming from the CUDA world, here's what you're used to a world of many small Stream Multiprocessors (SMs) following the SIMT model: Thousands of indepedendent threads execute the same instruction. Each SM has only a small shared memory (~100-200 KB) and the main philosophy is that the massive parallelism compensates. The GPU bet is basically to throw enough threads at the problem and latency will disappear: If thousands of other threads keep the hardware busy while some stall, you are utilizing your compute well. 
 
 Neuron makes the opposite architectural design choice: *dedicate die area to massive compute engines and fast on-chip memory, not thread management.*
 
@@ -30,6 +19,11 @@ The Trainium2 chip: 8 NeuronCore-v3 engines, 96 GiB HBM, 224 MiB SBUF.
 ```
 
 Each Trainium2 chip contains **8 NeuronCore-v3** cores. Each NeuronCore has specialized engines:
+
+```{admonition} Why you see 4 cores on trn2.3xlarge
+:class: note
+The diagram shows the full physical chip (8 cores). A `trn2.3xlarge` is a single-chip instance, but exposes only **4 NeuronCores** — half of the chip's 8. DMA bandwidth is proportionally reduced as well. The full 8 cores per chip are accessible on `trn2.48xlarge` (16 chips × 8 cores = 128 NeuronCores).
+```
 
 | Engine | Role | Think of it as... |
 |--------|------|-------------------|
@@ -46,8 +40,32 @@ Each Trainium2 chip contains **8 NeuronCore-v3** cores. Each NeuronCore has spec
 
 Inside a single NeuronCore-v3: specialized engines connected by on-chip SRAM (SBUF).
 ```
+### Engine cost models
 
-**Key architectural insight:** NO independent threads. NO random-access write hardware. DMA only does contiguous bulk transfers. Die area went to a bigger systolic array instead of atomic units.
+Each engine has a distinct cost profile shaped by how it parallelizes work:
+
+**Tensor engine (128×128 systolic array).** The dominant engine — 90% of a model's TFLOPs live here. It has two phases: *load stationary* (filling the array with a weight tile) is pure data movement and runs **4× faster** than *multiply moving* (streaming activations through and accumulating). Design principle: map the larger tensor to stationary, the smaller to moving.
+
+**Vector engine (128 parallel lanes).** Each lane processes one element simultaneously, so work that spans all 128 lanes costs the same as work that spans 2 — the parallelism is free. But within each lane, cost is linear: reducing 1000 elements takes twice as long as reducing 500.
+
+**Scalar engine (128 parallel lanes).** Same parallel model as vector. Each lane evaluates one element through polynomial lookup hardware (for transcendentals like exp, rsqrt).
+
+**GPSIMD (8 cores, not 128 lanes).** The weakest engine by throughput — only 8 parallel units instead of 128. Handles edge cases: indirect memory access, triangular masks, random number generation, and custom C++ operators.
+
+```{figure} ../assets/GmSimd_engine.png
+:alt: GpSimd engine
+:width: 500px
+:align: center
+
+The GpSimd engine: 8 general-purpose SIMD cores for operations that don't fit the specialized engines.
+```
+
+**DMA engines (16 per core, ~277 GB/s each).** A single DMA transfer writes one contiguous block. Large contiguous transfers (≥32 KB) saturate bandwidth; many small transfers (4-byte strided reads) are catastrophic. A real customer hit this: a recommendation model spent 70% of execution time in DMA because the compiler chose an HBM layout that forced perpetual 4-byte reads.
+
+```{admonition} The rule of thumb
+:class: tip
+If an operation doesn't map naturally to one of these engines — if it requires random-access writes, irregular gather patterns, or complex control flow — it probably won't perform well on Neuron. Large embedding table lookups are a classic example.
+```
 
 ### Trainium2 specs
 
@@ -103,9 +121,17 @@ Each of these primitives needs to run on specific hardware. Let's think through 
 
 **Reductions and element-wise math** (the subtract, multiply, and sum operations inside layer_norm) operate on vectors of values. The Vector engine handles these with 128-wide SIMD — it processes 128 elements per cycle in parallel.
 
+```{figure} ../assets/vector_engine.png
+:alt: Vector engine parallel lanes
+:width: 500px
+:align: center
+
+The Vector engine: 128 parallel lanes reducing across the free dimension.
+```
+
 **Transcendental functions** like rsqrt and erf can't be computed with simple arithmetic. The Scalar engine has dedicated piecewise polynomial hardware — essentially lookup tables with interpolation — that approximate these functions efficiently.
 
-**Data movement** between HBM (where your tensors live) and SBUF (where engines read from) is handled by 32 parallel DMA engines. They operate on contiguous chunks and can run concurrently with compute.
+**Data movement** between HBM (where your tensors live) and SBUF (where engines read from) is handled by 16 parallel DMA engines. They operate on contiguous chunks and can run concurrently with compute.
 
 Putting it together:
 
@@ -115,7 +141,7 @@ Putting it together:
 | Reduce (sum across a dimension) | **Vector** | 128-wide SIMD partial sums |
 | Subtract, multiply (element-wise) | **Vector** | 128-wide SIMD |
 | rsqrt, erf (transcendentals) | **Scalar** | Polynomial lookup tables |
-| Move tiles HBM ↔ SBUF | **DMA** | 32 parallel engines |
+| Move tiles HBM ↔ SBUF | **DMA** | 16 parallel engines |
 
 So our 5-line function decomposes like this:
 
@@ -314,7 +340,7 @@ Five lines of Python became a choreography across 2 NeuronCores × (32 DMA engin
 
 ## Neuron architectural choices and tradeoff 
 
-Neuron makes a deliberate tradeoff: It bets that **95% of ML compute is matmul-shaped**: Most of the die area is allocated the to larger systolic arrays, so when you have layer operations that have more exotic memory access patterns, it can be more challenging to support them well (think scatter_reduce, etc.)
+Neuron makes a deliberate tradeoff: It bets that **95% of ML compute is matmul-shaped**: Most of the die area is allocated to larger systolic arrays, so when you have layer operations that have more exotic memory access patterns, it can be more challenging to support them well (think scatter_reduce, etc.)
 
 ---
 ## Engineering Principles

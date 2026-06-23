@@ -1,8 +1,8 @@
 # Multi-core, multi-chip
 
-*ESM-2 15B doesn't fit on one NeuronCore. How do you split it?*
+What should I do if my model doesn't fit on a single core? single chip? 
 
 ```{admonition} TODO
 :class: warning
-Draft content.
+Content not yet created
 ```
