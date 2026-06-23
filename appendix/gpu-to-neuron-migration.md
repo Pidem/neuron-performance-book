@@ -10,17 +10,26 @@ If you're coming from GPU expecting identical behavior with better price-perform
 
 ## When Neuron is the right fit
 
-**Good candidates:**
-- Transformer models (LLMs and diffusion) — the architecture maps naturally to the tensor engine
-- Teams open to optimization work — willing to profile, iterate, and go low-level when needed
-- Workloads where you need capacity, price-performance, or compute diversity beyond GPU availability
-- Strategic mindset — investing time to understand the hardware pays compounding returns
-- No hard CUDA dependencies (custom CUDA kernels, NCCL-specific communication patterns)
+Neuron's architecture excels in specific scenarios. Understanding where it shines helps you set the right expectations and invest your engineering effort where it compounds.
 
-**Poor candidates:**
-- Expecting a drop-in GPU replacement with zero engineering effort
-- Models heavily dependent on CUDA-specific libraries (cuDNN custom layers, custom CUDA kernels with no NKI equivalent yet)
-- Just looking for credits or trying Neuron only because GPUs are unavailable
+**Strong fit:**
+
+- **Transformer-based models (LLMs, diffusion, vision transformers)** — attention and MLP layers are dominated by large matrix multiplications, which map directly to the tensor engine's 128×128 systolic array. This is the workload Neuron was purpose-built for.
+- **Teams with a performance engineering culture** — if you already profile your GPU workloads, track MFU, and iterate on kernel efficiency, Neuron rewards that discipline. The profiler (Neuron Explorer) gives you deeper visibility than most GPU profiling tools, and NKI gives you more direct hardware control than CUDA in many respects.
+- **Capacity, cost, or compute diversity goals** — Neuron offers a path to large-scale training and inference without competing for GPU allocation. Trainium instances are available in regions and at price points that complement GPU fleets rather than replacing them.
+- **Long-term hardware investment** — the Neuron SDK, NKI, and PyTorch Native integration improve with each generation (Trn2 → Trn3 → Trn4). Teams that invest in understanding the architecture carry that knowledge forward as the hardware scales, with each generation delivering 4–6× improvements on the same code.
+- **Standard PyTorch/JAX workflows without hard CUDA coupling** — if your training loop uses `torch.compile`, HuggingFace Transformers, FSDP, or vLLM, the migration path is straightforward. These frameworks already support Neuron as a backend.
+
+**Weaker fit (today):**
+
+- **Models with extensive custom CUDA kernels** — if your forward pass depends on hand-written `.cu` files or libraries that wrap CUDA-specific implementations (custom cuDNN layers, NCCL-specific communication patterns), those will need NKI equivalents. The NKI Kernel Library covers common operations (flash attention, fused softmax, RMSNorm), but niche custom kernels require porting effort.
+- **Expectation of zero engineering effort** — Neuron is not a transparent GPU emulator. The one-line device change gets you *functional*, but competitive performance requires profiling and optimization work — the same work this book teaches. Teams that approach it as "just swap the device and ship" will be disappointed.
+- **Heavy scatter/gather workloads without workarounds** — GNNs, recommendation models with large sparse lookups, or architectures that rely heavily on irregular memory access patterns will hit more CPU fallbacks. These are solvable (reformulate as matmul, write NKI kernels) but require upfront investment.
+
+```{admonition} The honest framing
+:class: tip
+Neuron is not "GPUs but cheaper." It's a different architecture with a different optimization surface. The teams that succeed treat it as a performance engineering opportunity — and the ones that get the most value are those building on top of transformers at scale, where Neuron's architectural choices (large SRAM, dedicated tensor engine, independent collectives) create genuine advantages over GPU for their workload.
+```
 
 ---
 
