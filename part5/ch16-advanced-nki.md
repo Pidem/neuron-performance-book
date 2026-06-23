@@ -196,6 +196,13 @@ Apply fix → reprofile → repeat
 
 This is iterative. The 12-step attention optimization took the Annapurna team months to develop. But the pattern is learnable, and each step compounds.
 
+```{admonition} New in 2025: Scheduling and Allocation API
+:class: note
+NKI now exposes fine-grained control over instruction scheduling (which engine fires when) and tensor allocation (which SBUF bank holds which data). This is what enables the structured pipelines shown in this chapter — without it, you'd rely on the compiler's heuristics for scheduling, which may not discover the optimal overlap pattern for your kernel.
+
+The NKI compiler itself is being open-sourced — giving full transparency into how your kernel code compiles to hardware instructions. No more black boxes between your Python and the silicon.
+```
+
 ---
 
 ## Reference: the 98% HFU matmul
@@ -203,6 +210,25 @@ This is iterative. The 12-step attention optimization took the Annapurna team mo
 The NKI documentation contains a fully optimized tiled matmul tutorial that achieves **98% HFU** on a zero-shot profile. It demonstrates every technique in this chapter: optimal tile sizes, DMA pipelining, double-buffering, and instruction-level scheduling.
 
 Start there after this chapter: https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/tutorials/matrix_multiplication.html
+
+---
+
+## Case study: Anthropic's flash attention kernel
+
+Jay Gray (Anthropic's Trainium inference lead) optimized a fused flash attention kernel — QKV projection → self-attention → output projection — following exactly the cycle above. Here's what the profiler revealed and how they fixed it:
+
+**The unexpected bottleneck.** After basic optimization, the tensor engine showed dense matmul activity in the QKV projection... but gaps in the attention section. The profiler trace showed bursts of matrix multiplications interspersed with clusters of small vector operations. The tensor engine was idle during those vector bursts.
+
+**Root cause.** Reading the ISA view in Neuron Explorer, the bottleneck was *not* compute. It was vector ops shuffling intermediate results between SBUF memory banks — an inefficiently large number of small transfers, each paying instruction launch overhead.
+
+**The fix.** Rewrite the tiling so data moves between banks using fewer, larger vector operations — amortizing the per-instruction overhead. Same math, different scheduling. **Result: 13% speedup on attention from this single change.**
+
+**The progression on hardware generations.** The same kernel achieves ~60% tensor engine utilization on Trn2. On Trn3 — with 4× FP8 matmuls, faster vector/scalar engines, and faster comms — the same kernel reaches **over 90% tensor utilization** without algorithmic changes. Better hardware turns a good kernel into a great one.
+
+```{admonition} The lesson
+:class: tip
+The bottleneck wasn't where you'd guess. Not matmul speed, not softmax, not memory bandwidth — but instruction launch overhead on small vector shuffles. You can only find this with an instruction-level profiler. This is why Neuron Explorer exists.
+```
 
 Ron (Chief Architect): "Your goal is to write a kernel that hits 100% MFU. I have customers who do this. If my customers can do this, you can do this."
 

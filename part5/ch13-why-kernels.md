@@ -53,6 +53,13 @@ This is the deepest reason to learn NKI: not just "implement the missing op" but
 - **Don't write a kernel just because a GPU version exists.** The hardware is completely different. GPU bottlenecks may not exist on Neuron, and vice versa.
 - **Don't start at the keyboard.** Start at the whiteboard: What am I trying to do? What shapes? What's the theoretical best time? (roofline from Ch 9). Only then write code.
 
+```{admonition} The one rule of kernel engineering
+:class: important
+"The goal of a kernel and the goal of a kernel engineer is to make sure the tensor engine is always doing matrix multiplications. Everything else is essentially auxiliary data movement to ensure that when the tensor engine is done with one matmul, the data needed for the next one is ready to go."
+
+— Jay Gray, Trainium Inference Lead, Anthropic
+```
+
 The Neuron team's advice: "It's not because there is a kernel on GPU that you need one on Neuron — the hardware is totally different, bottlenecks may be different."
 
 ---

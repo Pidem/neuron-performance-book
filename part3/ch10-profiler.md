@@ -8,7 +8,14 @@
 
 Neuron Explorer is an instruction-level, cycle-accurate profiler with near-zero overhead. It shows you exactly what every engine is doing at every nanosecond — which instructions fired, what data moved, which engines were idle and why.
 
-Anthropic called it "the best profiler in the industry" and collaborated on the sampling algorithm design. The reason it's so good: NeuronCore hardware emits trace notifications for every instruction at the hardware level, so there's no sampling bias and no observer effect.
+```{admonition} No Heisenberg effect
+:class: tip
+Most profilers perturb what they measure — adding overhead that shifts bottlenecks. Neuron Explorer has dedicated hardware circuits that emit trace notifications for every instruction at silicon speed. The act of measurement doesn't move the bottleneck. In practice, you can run with profiling **always on** — the overhead is negligible enough that Neuron's runtime essentially keeps a profiler armed at all times.
+```
+
+> "Every flop, every nanosecond, every byte of memory in every operation of every kernel can be traced to this level of detail. This is a level of visibility into the performance of your kernels that you really just don't get anywhere else."
+>
+> — Jay Gray, Trainium Inference Lead, Anthropic
 
 It exposes two levels:
 - **Device profiling** — what's happening inside the NeuronCore: instructions on each engine, DMA transfers, memory utilization

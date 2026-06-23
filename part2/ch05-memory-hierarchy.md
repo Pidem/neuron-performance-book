@@ -205,3 +205,16 @@ The ultimate optimization is to never touch HBM during the forward pass at all. 
 For large models this isn't possible for the full model — but for individual operations it is. A fused attention kernel that keeps Q, K, V, and the attention scores entirely in SBUF (no intermediate HBM writes) is dramatically faster than one that spills intermediates. This is what FlashAttention achieves on GPU, and what NKI attention kernels achieve on Neuron.
 
 An internal Amazon team achieved **80% MFU** by designing their training pipeline to keep activations in SRAM the entire time, using SRAM-to-SRAM collectives between chips that skip HBM round-trips entirely. That's the ceiling — and it's achievable when you control the full stack.
+
+```{admonition} How SRAM-to-SRAM collectives work
+:class: note
+The default collective path is: SBUF → DMA → HBM → collective → HBM → DMA → SBUF. That's three memory hops each way. In latency-sensitive decode (streaming tokens one at a time), those extra hops dominate.
+
+Neuron hardware supports **direct SRAM-to-SRAM collectives** that skip HBM entirely. In the profiler, you can see the difference: without direct collectives, the GPSIMD engine spends all its time writing DMA descriptors for the intermediate memory movements between SBUF and HBM. With direct collectives, those descriptor-writing operations disappear entirely — the collective fires straight from on-chip memory to on-chip memory on the neighboring chip, and the latency drops dramatically.
+
+Anthropic uses this in their LLM decode kernels to minimize per-token latency on sharded models.
+```
+
+---
+
+*The memory hierarchy exists. The engines exist. But how does your PyTorch code actually reach them? What connects `model.to("neuron")` to DMA engines and systolic arrays?*

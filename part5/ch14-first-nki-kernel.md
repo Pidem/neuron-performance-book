@@ -185,3 +185,7 @@ This kernel works on exactly one tile. Real tensors (ESM-2 weights are 1280×128
 3. **Index** into the larger tensor to extract each tile
 
 This is tiling — and it requires understanding NKI's indexing system. That's next.
+
+---
+
+*You can load and store tiles. But how do you decompose a real operation — like a matmul — into tile-sized pieces? And which engine handles which part?*

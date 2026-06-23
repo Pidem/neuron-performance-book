@@ -245,9 +245,11 @@ Break Reasons:
 ```
 
 Common graph break causes:
-- `print()`, logging, any Python side effect
-- Data-dependent control flow (`if x.sum() > 0: ...`)
-- Unsupported ops (no Neuron implementation → fallback to CPU)
+- **`print()`, logging, any Python side effect** — Dynamo traces tensor operations, not arbitrary Python. When it encounters something that requires the Python interpreter (I/O, side effects), it must stop tracing, hand control back to Python, then start a new graph after.
+- **Data-dependent control flow** (`if x.sum() > 0: ...`) — the compiler needs to know the graph structure at trace time. If a branch depends on a tensor *value* (not shape), Dynamo can't know which path to take without actually running the computation — so it splits.
+- **Unsupported ops** (no Neuron implementation) — the op falls back to CPU, which forces a device transfer boundary. The graph before the op becomes one NEFF, the graph after becomes another.
+
+In short: anything that forces execution back to the Python interpreter or CPU creates a graph break. The compiler can only optimize what it can see as a continuous graph.
 
 ```{admonition} Graph breaks on Neuron are expensive
 :class: warning
@@ -387,5 +389,9 @@ The rest of this book helps you on this journey.
 
 Performance engineering on custom silicon, it gets easier.
 ```
+
+---
+
+*The compiler turns your Python into optimized hardware instructions. But what hardware is it targeting? What are the engines, the memory, the silicon that actually executes those instructions?*
 
 

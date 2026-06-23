@@ -69,7 +69,7 @@ for e in sorted(events, key=lambda e: e.cpu_time_total, reverse=True)[:10]:
 ESM-2 (650M params, 33 layers) decomposes into just a handful of ATen ops repeated hundreds of times. These are operations such as additions, transposes, views, multiplications.
 ```
 
-Now let's move this to Neuron. The model code doesn't change — we just move the tensors:
+Everything above ran on CPU, PyTorch's default device. Now let's move this to Neuron. The model code doesn't change, we just move the tensors:
 
 ```python
 model_neuron = model.to("neuron")
@@ -97,7 +97,7 @@ Same model, and of course, same results: The only difference are those `aten::ma
 
 What does "eager" mean? Python executes your code line by line. Each operation runs *immediately* and returns a result. There is no "graph" being built. There is no compilation step.
 
-This is different from TensorFlow 1.x, where you'd first build a graph of placeholder operations and then call `sess.run()` to execute them all at once.
+*Comment: This is different from TensorFlow 1.x, where you'd first build a graph of placeholder operations and then call `sess.run()` to execute them all at once.*
 
 Here's a concrete example of what eager mode costs you. Consider layer normalization followed by a linear projection:
 
@@ -565,3 +565,7 @@ What we've established:
 - **Fusion**: collapsing multiple ops into one reduces kernel launches and memory traffic.
 
 **Your model code never changes.** Only the dispatch target does. That's the abstraction. That's why "just change the device" works.
+
+---
+
+*These ops all operate on tensors — multi-dimensional arrays of numbers. But how is a tensor actually stored in memory? And does that layout affect performance?*

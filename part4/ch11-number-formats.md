@@ -77,6 +77,27 @@ FP8 halves memory vs BF16 and can double throughput on hardware with FP8 tensor 
 
 ---
 
+## When precision improves: bottlenecks move
+
+Reducing precision doesn't always give you the speedup you expect. Here's a real example from self-attention that illustrates why:
+
+**Self-attention pipeline:** QK^T matmul → softmax → V matmul
+
+**Step 1: BF16 baseline.** In BF16, the timeline is roughly balanced — matmuls and softmax take comparable time. The tensor engine is well-utilized.
+
+**Step 2: Switch matmuls to FP8.** The tensor engine runs at 2× throughput (1299 vs 667 TFLOPS). The QK^T and V matmuls finish in half the time. But total latency doesn't halve — because **softmax is now the bottleneck**. It runs on the scalar/vector engines at the same speed as before, and the tensor engine sits idle waiting for it.
+
+**Step 3: Hardware-accelerated softmax (Trn3).** Trainium 3 adds dedicated softmax circuits that run 4× faster while maintaining full precision. Now the pipeline is balanced again, and the end-to-end self-attention achieves the full 2× speedup.
+
+```{admonition} The lesson
+:class: important
+Optimizing one stage of a pipeline exposes the next bottleneck. Casting matmuls to FP8 without addressing the surrounding ops (softmax, layer norm, activations) gives you less than the theoretical 2× improvement. Always profile the full pipeline — not just individual ops — after a precision change.
+```
+
+This is why Neuron's approach combines lower-precision compute with specialized hardware acceleration for the operations that become bottlenecks. It's not enough to make numbers smaller — you need the entire pipeline to speed up together.
+
+---
+
 ## What Neuron supports
 
 ### NeuronCore-v2 (Trn1, Inf2)

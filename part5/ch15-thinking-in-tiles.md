@@ -209,3 +209,7 @@ Masked positions generate no instructions — no wasted compute, no branching. E
 | Reformulation | Recast operations as matmul to use the tensor engine |
 
 This kernel is correct and handles arbitrary sizes. But it's not fast — the triple loop is naive, with no DMA pipelining and no engine overlap. The profiler will show: tensor engine idle while DMA loads, DMA idle while tensor engine computes.
+
+---
+
+*The kernel works but it's slow — the profiler shows engines taking turns instead of working in parallel. How do you pipeline loads, computes, and stores to keep every engine busy?*

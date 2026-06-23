@@ -14,10 +14,20 @@ This book takes you from "I can call `model(x)`" to "I understand why my kernel 
 
 ```{admonition} The optimization ladder
 :class: tip
-**Eager** (get it running) → **torch.compile** (graph-level optimization) → **NKI** (kernel-level control)
+**Eager** (get it running) → **torch.compile** (graph-level optimization) → **NKI** (hand-written hardware instructions)
 ```
 
-We follow **ESM-2** (a 650M-parameter protein language model) from a black-box forward pass all the way down to hand-written NKI kernels. By the end, you'll have a complete mental model of what happens between `model(x)` and the transistors that execute it.
+Getting close to the chip's theoretical peak performance means turning different knobs — from how the compiler organizes your operations, to how data moves through memory, to how individual instructions are scheduled on hardware. Each knob gives you more control:
+
+| Level | What you write | What changes | Typical MFU |
+|-------|---------------|--------------|-------------|
+| **Eager** | `model.to("neuron")` | use `device='neuron'` | ~30% |
+| **torch.compile** | `torch.compile(model, backend="neuron")` | add one line; compiler fuses and tiles | 50–60% |
+| **Custom kernel (NKI)** | `@nki.jit` attention function | You control engines, tiling, pipelining | 80%+ |
+
+*MFU (Model FLOPs Utilization) measures what fraction of the chip's compute capacity your model actually uses, higher is better. A "kernel" here means a small program that runs directly on the accelerator hardware. NKI (Neuron Kernel Interface) is the Python DSL for writing them.*
+
+Each level requires more knowledge but delivers more performance. This book takes you through all three.
 
 ## How to use this book
 
@@ -27,7 +37,7 @@ We follow **ESM-2** (a 650M-parameter protein language model) from a black-box f
 
 ## Hardware setup
 
-All code in this book runs on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM). No GPU required — the entire book runs on Neuron from Chapter 1.
+All code in this book have been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
 
 ```{figure} assets/trn2_chip.png
 :alt: Trainium2 chip

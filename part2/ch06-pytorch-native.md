@@ -72,6 +72,20 @@ When you run PyTorch on Neuron, your code takes one of two paths depending on wh
 - **Eager mode** is for iteration and debugging. You get immediate feedback, can print any tensor, set breakpoints anywhere. It's what researchers use when experimenting — fast time to first result, even if each result is slower.
 - **torch.compile** is for production delivery. You pay compilation cost upfront, then get maximum hardware utilization on every subsequent call. It's what performance engineers hand off for deployment.
 
+```{admonition} Three personas, three levels
+:class: note
+
+The Neuron team designs for three distinct users — and their tools map directly to the optimization ladder:
+
+| Persona | What they do | Tool level | Expected MFU |
+|---------|-------------|------------|--------------|
+| **ML Developer** | Download model, fine-tune, build app | Eager + HuggingFace/vLLM | "It works" |
+| **Researcher** | Invent new ops, scan hyperparams | Eager + torch.compile | 30–60% |
+| **Performance Engineer** | Extract every FLOP from the chip | torch.compile + NKI | 60–80%+ |
+
+You don't need to be a performance engineer to use Neuron — the eager path gets you running with zero friction. But if you want to close the gap between "it works" and "it's fast," the rest of this book shows you how to climb the ladder.
+```
+
 ### Eager mode (op-by-op)
 
 ```python
@@ -267,4 +281,12 @@ Your PyTorch code
 ```
 
 The key insight: **the PyTorch Native integration means Neuron is a first-class PyTorch backend.** There's no separate framework to learn, no XLA quirks to work around, no special APIs. Your existing PyTorch knowledge transfers directly. The performance optimization story (torch.compile, profiling, NKI) layers on top of working code, you never need to change your model to make it *run*, only to make it *fast*.
+
+> "With the launch of AWS Trainium3, PyTorch developers can research, build and deploy their ideas at higher performance, lower latency and better token economics, all while maintaining their familiar PyTorch workflows and staying within the ecosystem they already know."
+>
+> — Jana van Greunen, Director of PyTorch Engineering, Meta
+
+---
+
+*So you change the device and it works. But does every operation actually run on Neuron? What happens when an op has no hardware implementation?*
 

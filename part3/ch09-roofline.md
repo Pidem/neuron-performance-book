@@ -179,3 +179,33 @@ The roofline represents 100% hardware utilization — you never actually reach i
 - Compiler scheduling inefficiency
 
 The profiler (next chapter) shows you *where* on the roofline you actually sit and the gap between actual and theoretical tells you how much optimization opportunity remains.
+
+---
+
+## Sustained vs. peak: what the spec sheet doesn't tell you
+
+The roofline uses *peak* hardware specs: 667 TFLOPS, 2.9 TB/s. But peak is a sprint — real training is a marathon.
+
+```{admonition} Sprinter vs. marathoner
+:class: tip
+Peak TFLOPS is the sprinter's 100m time. Sustained MFU is the marathoner's pace over 42km. AI training is a marathon — what matters is the pace you can hold for hours.
+```
+
+Why sustained performance falls below peak:
+- **Non-matmul ops block the tensor engine** — softmax, layer norm, and activations occupy vector/scalar engines while the tensor engine waits
+- **Tiling inefficiencies** — odd tensor dimensions don't perfectly fill the 128×128 systolic array
+- **Memory bank shuffles** — data occasionally lands in the wrong SBUF partition
+- **Thermal and power constraints** — sustained load across a full rack for hours
+
+**What "good" looks like:**
+- **30% MFU** — naive eager execution, no optimization
+- **50-60% MFU** — `torch.compile` with standard attention patterns
+- **80%+ MFU** — NKI-optimized kernels, careful memory management (a real customer achieved this on Trainium 3 for video generation, sustained over hours)
+
+Hardware generations also help: Anthropic's fused attention kernel achieves ~60% tensor utilization on Trn2 and over 90% on Trn3 — same kernel, better hardware closing the gap between sustained and peak.
+
+The gap between your current MFU and the roofline ceiling is your optimization budget. The profiler tells you exactly where the losses are — compute bubbles, memory stalls, or communication waits. Each chapter from here forward gives you tools to close that gap.
+
+---
+
+*I can estimate where my model should sit. But how do I actually measure where it is? How do I see inside the chip while it's running?*

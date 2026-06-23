@@ -2,6 +2,11 @@
 
 In Chapter 3, we saw the compiler collapse 1,050 NEFFs into one. But what hardware does that NEFF actually run on? In this chapter, we dive into the NeuronCore architecture.
 
+```{admonition} Production silicon, not research prototype
+:class: note
+AWS is one of TSMC's top 5 customers for advanced process nodes. Unlike typical chip development (A0, B0, C0 iterations), 14 out of the last 16 AWS chips went into multi-million unit production from the very first silicon revision. Trainium is battle-tested at scale — over a million chips deployed running customer workloads today.
+```
+
 ---
 
 ## The NeuronCore architecture
@@ -27,10 +32,10 @@ The diagram shows the full physical chip (8 cores). A `trn2.3xlarge` is a single
 
 | Engine | Role | Think of it as... |
 |--------|------|-------------------|
-| **Tensor engine** | Matrix multiplication (systolic array) | This is where FLOPs happen |
-| **Vector engine** | Reductions, accumulations, SIMD ops across 128 elements | The reducer — sum, mean, normalize |
-| **Scalar engine** | Element-wise ops (exp, reciprocal, comparisons) | The activator — one element at a time |
-| **GPSIMD engine** | Arbitrary C code for custom ops | The escape hatch |
+| **Tensor engine** | Matrix multiplication (systolic array) | One input → one output, via massive multiply-accumulate |
+| **Vector engine** | One output depends on *multiple* inputs (reductions, layer norm) | The reducer — 128 parallel lanes |
+| **Scalar engine** | One output depends on *one* input (exp, reciprocal, activations) | The activator — 128 parallel polynomial evaluators |
+| **GPSIMD engine** | Arbitrary C code for custom ops | The escape hatch — "invent operators we never thought of" |
 | **DMA engines** | Shuttle data between SRAM ↔ HBM | The trucks — keep the engines fed |
 
 ```{figure} ../assets/neuroncore-v3.png
@@ -46,6 +51,8 @@ Each engine has a distinct cost profile shaped by how it parallelizes work:
 
 **Tensor engine (128×128 systolic array).** The dominant engine — 90% of a model's TFLOPs live here. It has two phases: *load stationary* (filling the array with a weight tile) is pure data movement and runs **4× faster** than *multiply moving* (streaming activations through and accumulating). Design principle: map the larger tensor to stationary, the smaller to moving.
 
+The tensor engine has a **dual weight cache** — while the current matmul runs using the "foreground" weights, DMA loads the next weight tile into the "background" slot. When the current tile finishes, foreground and background swap instantly — no stall. This is why the profiler shows "Tensor Engine" (load stationary) and "TensorMatrix Engine" (multiply moving) as separate rows: they overlap.
+
 **Vector engine (128 parallel lanes).** Each lane processes one element simultaneously, so work that spans all 128 lanes costs the same as work that spans 2 — the parallelism is free. But within each lane, cost is linear: reducing 1000 elements takes twice as long as reducing 500.
 
 **Scalar engine (128 parallel lanes).** Same parallel model as vector. Each lane evaluates one element through polynomial lookup hardware (for transcendentals like exp, rsqrt).
@@ -60,11 +67,11 @@ Each engine has a distinct cost profile shaped by how it parallelizes work:
 The GpSimd engine: 8 general-purpose SIMD cores for operations that don't fit the specialized engines.
 ```
 
-**DMA engines (16 per core, ~277 GB/s each).** A single DMA transfer writes one contiguous block. Large contiguous transfers (≥32 KB) saturate bandwidth; many small transfers (4-byte strided reads) are catastrophic. A real customer hit this: a recommendation model spent 70% of execution time in DMA because the compiler chose an HBM layout that forced perpetual 4-byte reads.
+**DMA engines (16 per core, ~277 GB/s each).** A single DMA transfer writes one contiguous block. Large contiguous transfers (≥32 KB) saturate bandwidth; many small transfers (4-byte strided reads) are catastrophic.
 
 ```{admonition} The rule of thumb
 :class: tip
-If an operation doesn't map naturally to one of these engines — if it requires random-access writes, irregular gather patterns, or complex control flow — it probably won't perform well on Neuron. Large embedding table lookups are a classic example.
+If an operation doesn't map naturally to one of these engines (if it requires random-access writes, irregular gather patterns, or complex control flow,...) it probably won't perform well on Neuron. Large embedding table lookups are a classic example.
 ```
 
 ### Trainium2 specs
@@ -79,6 +86,23 @@ If an operation doesn't map naturally to one of these engines — if it requires
 | DMA bandwidth | 3.5 TB/s |
 | NeuronLink (chip-to-chip) | 1.28 TB/s |
 | CC-Cores (collectives) | 16 |
+
+### Peak vs. sustained: the sprinter and the marathoner
+
+Those spec numbers are *peak* performance — what the chip can sustain for a single instruction under ideal conditions. Real workloads are marathons, not sprints.
+
+```{admonition} The sprinter vs. marathoner analogy
+:class: tip
+A sprinter runs faster than a marathoner over 100m. But a marathoner wins the race that matters. AI training is a marathon — what matters is *sustained* throughput over hours, not peak FLOPs for one instruction.
+```
+
+Why sustained < peak:
+- **Softmax and other non-matmul ops** block the tensor engine between matmuls
+- **Tiling inefficiencies** — not all tile shapes perfectly fill the 128×128 systolic array
+- **Memory bank shuffles** — data in the wrong SBUF partition must be reorganized
+- **Thermal and power delivery** — real racks under full load for hours
+
+What "good" looks like: a customer doing real-time video generation recently exceeded **80% MFU** (Model FLOPs Utilization) sustained on Trainium 3. Getting from 30% MFU (naive eager) to 60% (torch.compile) to 80%+ (NKI-optimized) is the journey this book teaches.
 
 ---
 
@@ -370,5 +394,9 @@ The Neuron compiler handles the common cases well — matmuls, layer norms, atte
 When you hit that wall, an unsupported op falling back to CPU, a novel recurrence like DeltaNet or Mamba2, or a fusion pattern the compiler misses, you write directly to the hardware using **NKI (Neuron Kernel Interface)**. NKI gives you explicit control over DMA scheduling, engine assignment, and tile layout. You become the compiler.
 
 That's Part V of this book. For now, know that the engines and memory hierarchy we just explored are exactly what you'll be programming against.
+
+---
+
+*The chip has engines, SRAM, and HBM. But how does data actually flow between these levels? What decides what lives where, and when it moves?*
 
 
