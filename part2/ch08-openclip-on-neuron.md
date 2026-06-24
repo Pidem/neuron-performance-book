@@ -1,6 +1,6 @@
 # Case Study: OpenCLIP on Neuron
 
-*A pure transformer model that mostly "just works" — but even standard architectures hide indexing ops.*
+*A pure transformer model that works on Neuron out of the box, except for one hidden indexing op.*
 
 ```{admonition} Run it yourself
 :class: tip
@@ -175,7 +175,7 @@ The key difference: SchNet's bottleneck is in the **hot loop** (every layer, eve
 
 ---
 
-## When Does "Just Works" Apply?
+## When does it work out of the box?
 
 The vision encoder is a best-case scenario for Neuron. What made it work:
 

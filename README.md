@@ -7,7 +7,7 @@ Making the most of your PyTorch models on Neuron chips.
 ## Build the book and read locally
 
 ```bash
-pip install -r requirements.txt
+uv sync
 jupyter-book build .
 open _build/html/index.html
 ```
@@ -43,13 +43,9 @@ open _build/html/index.html
    ```
 
 ## Book Progress
-- [X] Intro 
-- [X] Part I
-- [ ] Part II
-- [ ] Part III
-- End to end examples with nki.language and nki.isa?
-- Repos of existing kernels
-- Multi-core/multichip patterns?
+- [X] First draft
+- [X] Multi-core/multichip patterns (Ch17)
+- [X] Prose polish pass (write skill)
 
 
 ## Deploy

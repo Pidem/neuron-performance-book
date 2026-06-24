@@ -1,8 +1,10 @@
 # Number formats for humans
 
-*ESM-2 attention scores: do they really need 32 bits?*
+You profiled a kernel in Neuron Explorer and spotted something odd: the Tensor Engine is idle 60% of the time, waiting on DMA. The operation is memory-bound, not because your matrix is small, but because each element is 4 bytes wide and HBM bandwidth is finite. What if each element were 2 bytes? Or 1?
 
-In Chapter 9, we learned that arithmetic intensity determines whether an operation is compute-bound or memory-bound. Smaller numbers = fewer bytes to move = higher effective arithmetic intensity. This chapter explains what you lose when you shrink numbers — and what you gain.
+*ESM-2 attention scores: do they need 32 bits?*
+
+Smaller numbers mean fewer bytes crossing the bus, which means higher effective arithmetic intensity for the same math. But how small can you go before the model stops working? And what exactly do you lose when you shrink a floating-point number from 32 bits to 8?
 
 ---
 
@@ -48,7 +50,7 @@ Bit layouts of common floating-point formats. BF16 keeps FP32's 8-bit exponent (
 
 - BF16 keeps the same 8-bit exponent as FP32 → same dynamic range, just less precision
 - FP16 has only 5-bit exponent → can overflow (values > 65,504 become infinity)
-- This is why BF16 "just works" as a drop-in for FP32 training — no loss scaling needed
+- This is why BF16 "just works" as a drop-in for FP32 training  (no loss scaling needed)
 - FP16 training requires loss scaling to prevent gradient overflow (added complexity)
 - Neuron natively supports both; BF16 is the default and recommended choice
 
@@ -83,7 +85,7 @@ Reducing precision doesn't always give you the speedup you expect. Here's a real
 
 **Self-attention pipeline:** QK^T matmul → softmax → V matmul
 
-**Step 1: BF16 baseline.** In BF16, the timeline is roughly balanced — matmuls and softmax take comparable time. The tensor engine is well-utilized.
+**Step 1: BF16 baseline.** In BF16, the timeline is roughly balanced with matmuls and softmax taking comparable time. The tensor engine is well-utilized.
 
 **Step 2: Switch matmuls to FP8.** The tensor engine runs at 2× throughput (1299 vs 667 TFLOPS). The QK^T and V matmuls finish in half the time. But total latency doesn't halve — because **softmax is now the bottleneck**. It runs on the scalar/vector engines at the same speed as before, and the tensor engine sits idle waiting for it.
 
@@ -146,14 +148,35 @@ export NEURON_RT_STOCHASTIC_ROUNDING_EN=1
 
 ---
 
-## Rules of thumb
+## Choosing a format: the decision framework
 
-- **Training forward pass:** BF16 (safe default) or FP8 E4M3 (if you validate accuracy)
-- **Training backward pass:** BF16 (safe) or FP8 E5M2 (wider range for gradients)
-- **Optimizer states:** always FP32 (Adam's running averages need precision)
-- **Inference weights:** FP8 or INT8 (half the memory, fits larger models on-chip)
-- **Inference activations:** BF16 (safe) or FP8 (if latency-critical and accuracy validated)
-- **Softmax, LayerNorm internals:** always FP32 (exponentiation and reduction need precision)
+Three questions decide your number format:
+
+**1. Is this operation accumulating many values?** (optimizer states, loss computation, running statistics) → **FP32.** Precision compounds over millions of additions.
+
+**2. Is this a matmul weight or activation in forward/backward?** → **BF16 by default.** Switch to FP8 when you've validated accuracy AND the operation is memory-bound (intensity < 230). FP8 halves the bytes and doubles effective bandwidth — but only helps if bandwidth was the bottleneck.
+
+**3. Is this inference-only with a latency target?** → **FP8 or INT8 for weights** (halves memory, fits larger models on-chip). Keep activations in BF16 unless you've measured acceptable accuracy loss.
+
+```
+Is it accumulation / optimizer / loss?
+  │ YES → FP32
+  │ NO
+  ▼
+Is it a matmul (forward or backward)?
+  │ YES → BF16 default; FP8 if memory-bound AND accuracy validated
+  │ NO
+  ▼
+Is it softmax / layernorm / reduction?
+  │ YES → FP32 internally (cast back to BF16 after)
+  │ NO
+  ▼
+Element-wise op → same format as its input (BF16)
+```
+
+The rule underneath: **never downcast for compute-bound ops** (you gain nothing — the tensor engine is already saturated). **Always consider downcasting for memory-bound ops** (you shift the bottleneck from bandwidth to compute, which is where you want to be).
+
+---
 
 *Question raised → "How do I actually apply this on Neuron — which layers to cast, which to keep?"*
 

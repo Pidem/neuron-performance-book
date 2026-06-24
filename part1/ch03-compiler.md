@@ -2,13 +2,13 @@
 
 ## Recap 
 
-In chapter 1 and 2, we saw that in eager mode, each operation is independent: PyTorch dispatches each operation without taking into consideration the "big picture". No operation knows what comes next, layout choices are made locally, fusion are made manually. This the problem that the compiler solves for: The compiler looks at the entire computational graph and optimizes globally. 
+In Chapters 1 and 2, we saw that eager mode is local: PyTorch dispatches each operation without seeing what comes next. Layout choices are local, fusions are manual. The compiler fixes this by looking at the entire computational graph and optimizing globally.
 
 ---
 
 ## Benchmarking inference with and without compilation
 
-In Chapter 1 we ran ESM-2 in eager mode — each of the ~330 ops compiled and executed independently. What if the compiler could see the *entire* forward pass as one graph?
+In Chapter 1 we ran ESM-2 in eager mode. Each of the ~330 ops compiled and executed independently. What if the compiler could see the *entire* forward pass as one graph?
 
 ```python
 import torch, time
@@ -120,7 +120,7 @@ $ neuron-explorer view -d /workshop/profile_compiled --display-name compiled --o
 
 The numbers tell a clear story:
 
-- **Eager**: 1,050 separate NEFFs submitted one by one. Each needs its own DMA setup, memory allocation, and model switch. The NeuronCore spends most of its time *managing* work — loading NEFFs, shuffling data, switching contexts.
+- **Eager**: 1,050 separate NEFFs submitted one by one. Each needs its own DMA setup, memory allocation, and model switch. The NeuronCore spends most of its time *managing* work: loading NEFFs, shuffling data, switching contexts.
 
 - **Compiled**: the entire ESM-2 forward pass (33 transformer layers, 650M parameters) fuses into **1 NEFF**, submitted once, executed in 2 pipelined hardware passes with 14 DMA transfers total.
 
@@ -372,15 +372,11 @@ The output device is not proof of native execution. To detect fallbacks:
 
 ## Conclusion: What we've learned — and where we're going
 
-In three chapters, we've gone from "call `model(x)` and hope for the best" to understanding why one line of code (`torch.compile`) gives us an 8x speedup: We now understand the impact of graph breaks, of fused operations, and are begining to form an intuition on why profiling is key. 
+In three chapters, we've gone from `model(x)` to understanding why `torch.compile` gives an 8× speedup. We understand the impact of graph breaks, of fused operations, and why profiling matters.
 
 These are software-level decisions that directly translate into hardware-level outcomes. You don't need to change the math. You need to understand how the hardware wants to receive it.
 
-But we've also hit the compiler's limits. It can't fix algorithmic complexity. It can't optimize across compilation boundaries. It can't beat a hand-written kernel that exploits hardware-specific knowledge. When you need that level of control — *how* tiles move through the memory hierarchy, *when* engines overlap, *which* data stays on-chip — you need to understand the hardware itself.
-
-That's the art of performance engineering: designing your software layer with the hardware's strengths and constraints in mind. The first time you do it without a hardware background, there's a learning curve. But it's deeply satisfying work — and in today's era of AI-assisted coding, the barrier to entry is lower than ever.
-
-The rest of this book helps you on this journey.
+But we've also hit the compiler's limits. It can't fix algorithmic complexity, optimize across compilation boundaries, or beat a hand-written kernel that exploits hardware-specific knowledge. For that, you need to understand the hardware itself.
 
 ```{figure} ../assets/meme_Firsttime.png
 :alt: First time?

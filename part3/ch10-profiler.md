@@ -6,11 +6,11 @@
 
 ## What is Neuron Explorer?
 
-Neuron Explorer is an instruction-level, cycle-accurate profiler with near-zero overhead. It shows you exactly what every engine is doing at every nanosecond — which instructions fired, what data moved, which engines were idle and why.
+Neuron Explorer is an instruction-level, cycle-accurate profiler with near-zero overhead. It shows you exactly what every engine is doing at every nanosecond, which instructions fired, what data moved, which engines were idle and why.
 
 ```{admonition} No Heisenberg effect
 :class: tip
-Most profilers perturb what they measure — adding overhead that shifts bottlenecks. Neuron Explorer has dedicated hardware circuits that emit trace notifications for every instruction at silicon speed. The act of measurement doesn't move the bottleneck. In practice, you can run with profiling **always on** — the overhead is negligible enough that Neuron's runtime essentially keeps a profiler armed at all times.
+Most profilers perturb what they measure adding overhead that shifts bottlenecks. Neuron Explorer has dedicated hardware circuits that emit trace notifications for every instruction at silicon speed. The act of measurement doesn't move the bottleneck. In practice, you can run with profiling **always on** and the overhead is negligible enough that Neuron's runtime keeps a profiler armed at all times.
 ```
 
 > "Every flop, every nanosecond, every byte of memory in every operation of every kernel can be traced to this level of detail. This is a level of visibility into the performance of your kernels that you really just don't get anywhere else."
@@ -103,10 +103,7 @@ Ron (Chief Architect, Annapurna): "If you see MFU in the teens or low single dig
 
 ### System Trace View
 
-Shows the timeline across the full stack — Python thread, torch.compile dispatch, runtime, and hardware. Useful for spotting:
-- Framework overhead (time between Python and hardware execution)
-- Multi-core synchronization gaps
-- Runtime setup costs (NEFF loading, memory allocation)
+Shows the timeline across the full stack (Python thread, torch.compile dispatch, runtime, and hardware). It's useful for spotting framework overhead (time between Python and hardware execution), multi-core synchronization gaps and runtime setup costs (NEFF loading, memory allocation)
 
 Double-click on a hardware execution block to drill into the Device Trace.
 

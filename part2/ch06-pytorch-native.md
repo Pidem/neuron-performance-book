@@ -1,12 +1,12 @@
 # PyTorch Native on Neuron
 
-In Chapter 4, we saw what the NeuronCore hardware looks like — engines, SBUF, DMA. But how does your PyTorch code actually *reach* those engines? This chapter covers the integration layer: how Neuron registers itself as a PyTorch backend, what happens when you call `.to("neuron")`, and why a one-line change is enough to run any model.
+In Chapter 4, we saw what the NeuronCore hardware looks like: engines, SBUF, DMA. But how does your PyTorch code *reach* those engines? This chapter covers the integration layer: how Neuron registers itself as a PyTorch backend, what happens when you call `.to("neuron")`, and why a one-line change is enough to run any model.
 
 ---
 
 ## The PrivateUse1 backend
 
-PyTorch has a built-in extension mechanism for hardware accelerators. Every device type — CPU, CUDA, MPS — is a registered backend that responds to dispatched ops. Neuron uses the same mechanism via `PrivateUse1`, a dispatch key reserved for out-of-tree backends:
+PyTorch has a built-in extension mechanism for hardware accelerators. Every device type (CPU, CUDA, MPS) is a registered backend that responds to dispatched ops. Neuron uses the same mechanism via `PrivateUse1`, a dispatch key reserved for out-of-tree backends:
 
 ```python
 import torch
@@ -31,7 +31,7 @@ torch.matmul(A, B)      A.device == "neuron"
 └─────────────────┘
 ```
 
-This is the same pattern CUDA uses — there's nothing special about Neuron's integration. The `torch.accelerator` API auto-detects the available backend:
+This is the same pattern CUDA uses, so there's nothing special about Neuron's integration. The `torch.accelerator` API auto-detects the available backend:
 
 ```python
 print(torch.accelerator.current_accelerator())  # "neuron"
@@ -40,9 +40,10 @@ print(torch.accelerator.device_count())         # number of NeuronCores (4 cores
 
 ---
 
-## A brief history of PyTorch Native support for Neuron (optional read)
+````{admonition} A brief history: the XLA era (before 2024)
+:class: dropdown
 
-Before 2024, Neuron's PyTorch integration went through **XLA** (the same framework TPUs use). XLA works by capturing an entire computation graph lazily and compiling it all at once:
+Before PyTorch Native, Neuron's PyTorch integration went through **XLA** (the same framework TPUs use). XLA captures an entire computation graph lazily and compiles it all at once:
 
 ```python
 # The OLD way (XLA) — don't do this anymore
@@ -54,7 +55,7 @@ output = model(x)
 xm.mark_step()  # ← required: triggers compilation and execution of everything above
 ```
 
-XLA had real advantages — whole-graph compilation enabled aggressive optimizations. But it also had painful problems:
+XLA had real advantages since whole-graph compilation enabled aggressive optimizations. But it also had painful problems:
 
 - **Debugging was impossible.** Errors surfaced as compiler failures deep inside XLA, not at the Python line that caused them.
 - **Dynamic control flow broke.** Any `if/else` depending on tensor values caused graph breaks that XLA couldn't recover from gracefully.
@@ -62,28 +63,29 @@ XLA had real advantages — whole-graph compilation enabled aggressive optimizat
 - **Falling behind.** PyTorch evolved faster than the XLA team could follow — new features like `torch.compile`, scaled_dot_product_attention, and FSDP2 all required XLA reimplementations.
 
 The PyTorch Native approach eliminates all of this.
+````
 
 ---
 
 ## The two execution paths
 
-When you run PyTorch on Neuron, your code takes one of two paths depending on whether you use `torch.compile`. These aren't just "slow vs fast" — they serve different stages of the development lifecycle:
+When you run PyTorch on Neuron, your code takes one of two paths depending on whether you use `torch.compile`. These serve different stages of the development lifecycle:
 
-- **Eager mode** is for iteration and debugging. You get immediate feedback, can print any tensor, set breakpoints anywhere. It's what researchers use when experimenting — fast time to first result, even if each result is slower.
+- **Eager mode** is for iteration and debugging. You get immediate feedback, can print any tensor, set breakpoints anywhere. It's what researchers use when experimentingL fast time to first result, even if each result is slower.
 - **torch.compile** is for production delivery. You pay compilation cost upfront, then get maximum hardware utilization on every subsequent call. It's what performance engineers hand off for deployment.
 
-```{admonition} Three personas, three levels
+```{admonition} The optimization ladder (this book's structure)
 :class: note
 
-The Neuron team designs for three distinct users — and their tools map directly to the optimization ladder:
+Each level gives you more control over hardware utilization. The book walks you through them in order:
 
-| Persona | What they do | Tool level | Expected MFU |
-|---------|-------------|------------|--------------|
-| **ML Developer** | Download model, fine-tune, build app | Eager + HuggingFace/vLLM | "It works" |
-| **Researcher** | Invent new ops, scan hyperparams | Eager + torch.compile | 30–60% |
-| **Performance Engineer** | Extract every FLOP from the chip | torch.compile + NKI | 60–80%+ |
+| Level | Tool | What you gain | Book chapters |
+|-------|------|---------------|---------------|
+| **Get it running** | Eager mode + `.to("neuron")` | Correct results, zero code changes | Ch 1–2, 6–8 |
+| **Get it fast** | `torch.compile` + profiling | Graph fusion, eliminated overhead (30–60% MFU) | Ch 3, 9–10 |
+| **Get it optimal** | NKI kernels + number formats | Direct hardware control (60–80%+ MFU) | Ch 11–16 |
 
-You don't need to be a performance engineer to use Neuron — the eager path gets you running with zero friction. But if you want to close the gap between "it works" and "it's fast," the rest of this book shows you how to climb the ladder.
+You don't need to reach the bottom row for most workloads. But when you do, the tools are there.
 ```
 
 ### Eager mode (op-by-op)
@@ -152,7 +154,7 @@ NEFF (one binary for the entire graph)
 Execute on NeuronCore
 ```
 
-Both paths use the same compiler backend (neuronx-cc). The difference is *granularity*: eager compiles one op at a time; torch.compile compiles the full graph. This is why torch.compile gives the 8× speedup we saw in Chapter 3 — the compiler can fuse ops, eliminate intermediate memory writes, and pipeline DMA across the entire graph.
+Both paths use the same compiler backend (neuronx-cc). The difference is *granularity*: eager compiles one op at a time; torch.compile compiles the full graph. This is why torch.compile gives the 8× speedup we saw in Chapter 3: The compiler can fuse ops, eliminate intermediate memory writes, and pipeline DMA across the entire graph.
 
 ---
 
@@ -174,7 +176,7 @@ result = torch.scatter(x, 1, indices, src)
 print(result.device)  # neuron:0 — looks normal!
 ```
 
-The output tensor reports `device=neuron:0` because the runtime moves the result back automatically. **The fallback is functionally invisible** — your model produces correct results. But the PCIe round-trip (device → host → compute → host → device) adds latency.
+The output tensor reports `device=neuron:0` because the runtime moves the result back automatically. **The fallback is functionally invisible** and your model produces correct results. But the PCIe round-trip (device → host → compute → host → device) adds latency.
 
 The contract is: **correctness first, performance second.** Any PyTorch model should *run* on Neuron. Not all operations will run *fast*. The fallback mechanism ensures you can always get a model working, then optimize the hot path.
 
@@ -207,7 +209,7 @@ One word changed. Everything else — the optimizer, the data loading, `loss.bac
 
 ```{admonition} The performance ladder
 :class: note
-The API is identical to CUDA — same dispatcher, same device change. But the path to peak performance is different. On GPU, vendor libraries (cuBLAS, cuDNN) provide strong defaults — you start fast and optimize from there. On Neuron, the ladder is: eager mode (correctness) → `torch.compile` (graph-level optimization) → NKI kernels (hardware-level control). Each step unlocks more performance by giving the compiler — or you — more information about the workload. The upside: NKI gives you direct hardware access that no GPU vendor exposes. The book walks you up this ladder.
+The API is identical to CUDA: it uses the same dispatcher, but the path to peak performance is different. On GPU, vendor libraries (cuBLAS, cuDNN) provide strong defaults and you start fast and optimize from there. On Neuron, the ladder is: eager mode (correctness) → `torch.compile` (graph-level optimization) → NKI kernels (hardware-level control). Each step unlocks more performance by giving the compiler — or you — more information about the workload. The upside: NKI gives you direct hardware access that no GPU vendor exposes. The book walks you up this ladder.
 ```
 
 What you *do* need to be aware of:
@@ -250,6 +252,12 @@ torch.ops.my_namespace.my_op = my_kernel
 The pattern mirrors Triton: `nki.jit` ↔ `triton.jit`. Custom kernels participate in autograd (you can define backward passes), work in both eager and compiled modes, and can be reused across models. When compiled with `torch.compile`, the NKI kernel and the surrounding model code are fused into a single NEFF — there's no separate dispatch or binary loading at runtime. We'll write our first NKI kernel in Part V.
 
 ---
+```{figure} ../assets/neuron_sdk.png
+:align: center
+:width: 80%
+
+The Neuron SDK stack bridging PyTorch to NeuronCore hardware.
+```
 
 ## The full picture
 
@@ -282,11 +290,7 @@ Your PyTorch code
 
 The key insight: **the PyTorch Native integration means Neuron is a first-class PyTorch backend.** There's no separate framework to learn, no XLA quirks to work around, no special APIs. Your existing PyTorch knowledge transfers directly. The performance optimization story (torch.compile, profiling, NKI) layers on top of working code, you never need to change your model to make it *run*, only to make it *fast*.
 
-> "With the launch of AWS Trainium3, PyTorch developers can research, build and deploy their ideas at higher performance, lower latency and better token economics, all while maintaining their familiar PyTorch workflows and staying within the ecosystem they already know."
->
-> — Jana van Greunen, Director of PyTorch Engineering, Meta
-
 ---
 
-*So you change the device and it works. But does every operation actually run on Neuron? What happens when an op has no hardware implementation?*
+*So you change the device and it works. But does every operation run on Neuron? What happens when an op has no hardware implementation?*
 

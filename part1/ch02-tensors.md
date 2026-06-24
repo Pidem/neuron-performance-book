@@ -1,14 +1,14 @@
 # Tensors aren't just arrays
 
-In Chapter 1, we watched the dispatcher route `aten::matmul` to a backend kernel. But what exactly does the kernel receive? Not "a matrix" — that's a mathematical concept. The kernel needs a physical address, a way to navigate the memory layout, and enough metadata to interpret the bytes.
+In Chapter 1, we watched the dispatcher route `aten::matmul` to a backend kernel. But what exactly does the kernel receive? A physical address, a way to navigate the memory layout, and enough metadata to interpret the bytes.
 
-That's what a **tensor** is in PyTorch: a view into a block of memory, plus the metadata to navigate it. This distinction — data vs. view of data — determines which operations are free and which silently copy gigabytes behind your back.
+That's what a **tensor** is in PyTorch: a view into a block of memory, plus the metadata to navigate it. The distinction between data vs. view of data determines which operations are free and which silently copy gigabytes behind your back.
 
 ---
 
 ## What is a tensor?
 
-Let's look at ESM-2's embedding table — the lookup table that converts amino acid tokens into 1280-dimensional vectors:
+Let's look at ESM-2's embedding table, the lookup table that converts amino acid tokens into 1280-dimensional vectors:
 
 ```python
 from transformers import EsmModel
@@ -44,7 +44,7 @@ That's the whole tensor. Five fields:
 └─────────────────────────────────────────────────────────┘
 ```
 
-The data pointer gives the starting address. The shape describes logical dimensions. The dtype says how many bytes per element and how to interpret them. The device tells the dispatcher which hardware owns this memory. And strides — the interesting one — encode how to convert a multi-dimensional index into a byte offset, which is what makes transpose and reshape possible without copying.
+The data pointer gives the starting address. The shape describes logical dimensions. The dtype says how many bytes per element and how to interpret them. The device tells the dispatcher which hardware owns this memory. And strides (the interesting one) encode how to convert a multi-dimensional index into a byte offset, which is what makes transpose and reshape possible without copying.
 
 ---
 
@@ -56,7 +56,7 @@ Memory is flat. A 2D tensor is a human concept. The hardware sees a linear seque
 offset = i * stride[0] + j * stride[1]
 ```
 
-Here's how it works on a small example — a 2×3 tensor with strides `(3, 1)`:
+Here's how it works on a small example, a 2×3 tensor with strides `(3, 1)`:
 
 ```
   Logical view:         Physical memory (flat):
@@ -91,13 +91,13 @@ Memory: [row0_col0, row0_col1, ..., row0_col1279, row1_col0, row1_col1, ...]
 
 This is **row-major** (C-contiguous) layout: elements within a row are adjacent in memory. PyTorch uses row-major by default.
 
-Why does this matter? Because hardware reads memory in **chunks**. When you access `embed[5]` (an entire row), the hardware loads 1280 consecutive floats — one efficient burst. When you access `embed[:, 100]` (a column), the hardware must skip 1280 elements between each value — 33 separate small reads.
+Why does this matter? Because hardware reads memory in **chunks**. When you access `embed[5]` (an entire row), the hardware loads 1280 consecutive floats in one efficient burst. When you access `embed[:, 100]` (a column), the hardware must skip 1280 elements between each value: 33 separate small reads.
 
 ---
 
-## Views — zero-cost reshaping
+## Views: zero-cost reshaping
 
-Here's where tensors diverge from arrays. Many operations that *look* like they create new data actually just create a new **view** — a different set of (shape, strides, offset) pointing at the same memory:
+Here's where tensors diverge from arrays. Many operations that *look* like they create new data actually just create a new **view**, a different set of (shape, strides, offset) pointing at the same memory:
 
 ```python
 row = embed[5]  # slice one row
@@ -127,7 +127,7 @@ Strides: (1, 1280)
 Same memory: True
 ```
 
-`.T` didn't move a single byte. It just swapped the strides: what was stride `(1280, 1)` became `(1, 1280)`. Both tensors are just different *views* of the same underlying storage. The "rows" of the transposed tensor are the columns of the original — and they're spaced 1 element apart in memory, while the "columns" of the transposed tensor are spaced 1280 apart.
+`.T` didn't move a single byte. It just swapped the strides: what was stride `(1280, 1)` became `(1, 1280)`. Both tensors are just different *views* of the same underlying storage. The "rows" of the transposed tensor are the columns of the original, and they're spaced 1 element apart in memory, while the "columns" of the transposed tensor are spaced 1280 apart.
 
 ```
   embed                         embed.T
@@ -151,7 +151,7 @@ Same memory: True
 
 ## The importance of contiguity
 
-A tensor is **contiguous** when its strides match what you'd expect from its shape — i.e., elements are laid out in memory in the "natural" row-major order. Our original embedding is contiguous. The transpose is not:
+A tensor is **contiguous** when its strides match what you'd expect from its shape, i.e., elements are laid out in memory in the "natural" row-major order. Our original embedding is contiguous. The transpose is not:
 
 ```python
 print(f"embed contiguous:   {embed.is_contiguous()}")
@@ -163,7 +163,7 @@ embed contiguous:   True
 embed.T contiguous: False
 ```
 
-Why does this matter? Because kernels load data from device memory (HBM) into fast on-chip SRAM via DMA transfers that operate on **contiguous address ranges**. One DMA instruction says "starting at address X, copy N consecutive bytes." If your tensor is contiguous, that's one burst. If it's non-contiguous — say, a transpose where consecutive logical elements are 1280 floats apart — the hardware must issue separate transfers for each row, wasting bandwidth.
+Why does this matter? Because kernels load data from device memory (HBM) into fast on-chip SRAM via DMA transfers that operate on **contiguous address ranges**. One DMA instruction says "starting at address X, copy N consecutive bytes." If your tensor is contiguous, that's one burst. If it's non-contiguous (say, a transpose where consecutive logical elements are 1280 floats apart) the hardware must issue separate transfers for each row, wasting bandwidth.
 
 This applies on any accelerator including Neuron (where DMA loads tiles from HBM into SBUF). We'll see the hardware details in Chapter 4.
 
@@ -225,13 +225,13 @@ Strides: (20480, 1024, 32, 1)
 The shape is `[batch, heads, seq_len, seq_len]`. The strides tell us the memory layout:
 
 ```
-batch  stride = 20480  (= 20 × 1024 = heads × seq² — skip one full batch)
-head   stride = 1024   (= 32 × 32 = seq² — skip one full head)
-row    stride = 32     (= seq_len — skip one row)
+batch  stride = 20480  (= 20 × 1024 = heads × seq², skip one full batch)
+head   stride = 1024   (= 32 × 32 = seq², skip one full head)
+row    stride = 32     (= seq_len, skip one row)
 col    stride = 1      (adjacent in memory)
 ```
 
-This means: **within one attention head, the seq×seq matrix is contiguous**. Accessing `attn[0, 0]` (one head's full attention pattern) gives you a contiguous 32×32 block — exactly what a kernel wants when it processes one head at a time.
+This means: **within one attention head, the seq×seq matrix is contiguous**. Accessing `attn[0, 0]` (one head's full attention pattern) gives you a contiguous 32×32 block, exactly what a kernel wants when it processes one head at a time.
 
 But what if you wanted all heads' attention for position 5 attending to position 10?
 
@@ -243,11 +243,11 @@ print(f"Strides: {across_heads.stride()}")
 Strides: (1024,)
 ```
 
-PyTorch reports this 1D tensor as "contiguous" (a 1D tensor is trivially contiguous — there's no second dimension to be out of order with). But look at the stride: 1024. Each element is 1024 floats apart in physical memory. Loading these 20 values means touching 20 scattered cache lines across 80 KB, rather than reading 80 consecutive bytes.
+PyTorch reports this 1D tensor as "contiguous" (a 1D tensor is trivially contiguous, there's no second dimension to be out of order with). But look at the stride: 1024. Each element is 1024 floats apart in physical memory. Loading these 20 values means touching 20 scattered cache lines across 80 KB, rather than reading 80 consecutive bytes.
 
 This is why attention implementations carefully choose which dimension to parallelize over. Parallelizing over heads (dim 1) gives each thread a contiguous seq×seq block. Parallelizing over sequence positions would give each thread scattered data.
 
-Here we create two tensors with the exact same values and shape, but different memory layouts — then benchmark the same matmul:
+Here we create two tensors with the exact same values and shape, but different memory layouts, then benchmark the same matmul:
 
 ```python
 import torch, time
@@ -301,13 +301,13 @@ Non-contiguous: 0.077ms
 Ratio: 1.33x
 ```
 
-**33% slower** — same values, same shape, same operation. The non-contiguous stride forces the DMA engine to gather data with gaps instead of streaming it sequentially from HBM into on-chip memory. Multiply this by the hundreds of matmuls in ESM-2's 33 layers, and layout becomes a real performance factor.
+**33% slower.** Same values, same shape, same operation. The non-contiguous stride forces the DMA engine to gather data with gaps instead of streaming it sequentially from HBM into on-chip memory. Multiply this by the hundreds of matmuls in ESM-2's 33 layers, and layout becomes a real performance factor.
 
 ---
 
 ## The memory hierarchy on Neuron
 
-We've said "contiguous is faster" — but faster at what, exactly? At moving data through the memory hierarchy that every accelerator shares:
+We've said "contiguous is faster." But faster at what, exactly? At moving data through the memory hierarchy that every accelerator shares:
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -325,35 +325,22 @@ This connects back to Chapter 1's fusion story. Fusion eliminates *inter-kernel*
 
 ---
 
-## The dispatcher cares about layout
+## Layout is a performance decision
 
-Back in Chapter 1, we said the dispatcher routes ops based on device and dtype. There's a third axis: **layout**.
+Back in Chapter 1, we said the dispatcher routes ops based on device and dtype. There's a third axis: **layout**, how the data is physically organized in memory.
 
-```python
-# Dense strided tensor — the default
-dense = torch.randn(1000, 1000)
-print(f"Layout: {dense.layout}")  # torch.strided
-
-# Sparse tensor — different layout, different kernels
-sparse = dense.to_sparse()
-print(f"Layout: {sparse.layout}")  # torch.sparse_coo
-```
-
-```
-Layout: torch.strided
-Layout: torch.sparse_coo
-```
-
-The dispatcher uses (device, dtype, layout) as a triple to select the right kernel. Same mathematical operation, completely different implementation:
+The dispatcher uses (device, dtype, layout) as a triple to select a kernel implementation. Same mathematical operation, different layout, different performance:
 
 ```
 torch.mm(A, B)
-  ├── device=cpu,    layout=strided  → Intel MKL GEMM (AVX-512)
-  ├── device=neuron, layout=strided  → Compile to NEFF → execute on NeuronCore tensor engine
-  └── device=neuron, layout=sparse   → fallback to CPU (not yet supported)
+  ├── device=cpu,    layout=strided     → Intel MKL GEMM (AVX-512)
+  ├── device=neuron, layout=strided     → Compile to NEFF → tensor engine
+  └── device=neuron, layout=irregular   → slower path (gather/scatter needed)
 ```
 
-The dispatcher routes based on device *and* layout. On Neuron, strided (dense) tensors compile to efficient NEFFs. Sparse layouts currently fall back to CPU — the data moves across the bus, runs on MKL, and the result moves back. We'll see this concretely in Chapter 6 when we look at fallback behavior.
+This matters beyond the strided/non-contiguous distinction we already covered. Consider a molecular graph neural network: each atom sends messages to its neighbors. The *mathematical* operation is a weighted sum, conceptually simple. But if you represent the connectivity as index arrays and use `x[neighbor_indices]` to gather features, you're asking the hardware to do irregular memory access. The math is trivial; the memory access pattern is the bottleneck.
+
+The performance engineer's job is often to reformulate the *same math* into a layout the hardware prefers. In Chapter 7, we'll see a concrete example: a molecular GNN's scatter/gather operation (irregular indices) reformulated as a dense matrix multiply (contiguous, tensor-engine-friendly). Same result, 14× faster, because the data layout changed.
 
 ---
 

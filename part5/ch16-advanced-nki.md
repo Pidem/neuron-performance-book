@@ -2,6 +2,16 @@
 
 *From 24μs to 8.5μs: pipeline the attention kernel until the tensor engine never stops.*
 
+```{admonition} Run it yourself
+:class: tip
+Scripts for this chapter (run on trn2.3xlarge with Neuron venv activated):
+
+- `scripts/ch16_rmsnorm.py` — RMSNorm kernel combining reductions, scalar ops, and broadcasting (a real LLM building block)
+- `scripts/ch16_fused_attention.py` — fused self-attention at ISA level, profiled with `NeuronProfiler` for device timeline
+
+`NeuronProfiler` captures a device-level trace showing which engines are active or idle — wall clock time tells you *how slow*, the profiler tells you *why*.
+```
+
 ---
 
 ## Language vs ISA
@@ -51,7 +61,7 @@ After step 5: **24μs** steady-state. Profile shows vector engine oversubscribed
 | 7 | Combine scalar instructions | 1μs saved | Pack 3 scalar ops into one `activation` instruction |
 | 8 | Downcast scores to BF16 before transpose | 10% (→11μs) | Half the data to transpose, numerically safe after reduction |
 
-Key principle: all of steps 6-8 work on a **single tile** (`num_tiles=1`). Profiling one tile is dramatically simpler than profiling a multi-tile kernel — you can map every instruction to your code.
+Key principle: all of steps 6-8 work on a **single tile** (`num_tiles=1`). Profiling one tile is simpler than profiling a multi-tile kernel — you can map every instruction to your code.
 
 ### Phase 3: Pipelining (the big win)
 
@@ -150,7 +160,7 @@ After the 12-step bootcamp, optimizations fall into three buckets:
 
 - **Maximize transfer size:** ensure F ≥ 2048 for BF16 (see above)
 - **Choose transpose method wisely:** DMA transpose (crossbar on Trn2) vs tensor engine transpose — pick based on which resource is less constrained
-- **Avoid strided access:** contiguous HBM reads are dramatically faster than gathered reads
+- **Avoid strided access:** contiguous HBM reads are far faster than gathered reads
 
 ---
 

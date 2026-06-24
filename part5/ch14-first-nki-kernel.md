@@ -2,6 +2,15 @@
 
 *Load data, do some math, store the result. That's every kernel.*
 
+```{admonition} Run it yourself
+:class: tip
+Script for this chapter (run on trn2.3xlarge with Neuron venv activated):
+
+- `scripts/ch14_dma_basics.py` — DMA memory movement patterns, tiled copies, memset, and benchmarking with `nki.benchmark()`
+
+`nki.benchmark()` runs the kernel in isolation with no PyTorch dispatch overhead — it tells you the raw hardware execution time.
+```
+
 ---
 
 ## The pattern

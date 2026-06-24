@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 360" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="680" height="360" fill="#fafafa"/>
+  
+  <!-- Title -->
+  <text x="340" y="24" text-anchor="middle" font-size="13" font-weight="bold" fill="#333">Partition layout determines parallelism</text>
+  
+  <!-- Center rule: nl.load() maps dim 0 → partition -->
+  <text x="340" y="48" text-anchor="middle" font-size="10" fill="#555">nl.load() always maps dim 0 → partition (128 lanes), dim 1+ → free</text>
+
+  <!-- LEFT: Correct layout -->
+  <g transform="translate(30, 70)">
+    <text x="140" y="0" text-anchor="middle" font-size="11" font-weight="bold" fill="#2a9d8f">✓ Correct: [128, 512]</text>
+    
+    <!-- HBM tensor -->
+    <text x="10" y="22" font-size="9" fill="#666">dim 0 = 128, dim 1 = 512</text>
+    <rect x="10" y="30" width="260" height="50" fill="#e8f4f2" stroke="#2a9d8f" stroke-width="1.5" rx="3"/>
+    <text x="140" y="52" text-anchor="middle" font-size="9" fill="#555">128 fits partition exactly</text>
+    <text x="140" y="66" text-anchor="middle" font-size="9" fill="#555">512 goes to free dimension</text>
+    
+    <!-- SBUF layout -->
+    <text x="10" y="105" font-size="9" fill="#666">SBUF: all 128 lanes loaded</text>
+    <g transform="translate(10, 112)">
+      <rect x="0" y="0" width="260" height="90" fill="none" stroke="#2a9d8f" stroke-width="1.5" rx="3"/>
+      <rect x="3" y="3" width="254" height="8" fill="#2a9d8f" opacity="0.5"/>
+      <rect x="3" y="13" width="254" height="8" fill="#2a9d8f" opacity="0.5"/>
+      <rect x="3" y="23" width="254" height="8" fill="#2a9d8f" opacity="0.5"/>
+      <rect x="3" y="33" width="254" height="8" fill="#2a9d8f" opacity="0.4"/>
+      <text x="130" y="53" text-anchor="middle" font-size="8" fill="#555">... all 128 lanes active ...</text>
+      <rect x="3" y="60" width="254" height="8" fill="#2a9d8f" opacity="0.4"/>
+      <rect x="3" y="70" width="254" height="8" fill="#2a9d8f" opacity="0.5"/>
+      <rect x="3" y="80" width="254" height="8" fill="#2a9d8f" opacity="0.5"/>
+    </g>
+    
+    <!-- Result -->
+    <text x="140" y="228" text-anchor="middle" font-size="10" font-weight="bold" fill="#2a9d8f">128 elements processed per cycle</text>
+    <text x="140" y="244" text-anchor="middle" font-size="9" fill="#555">One tile, no loop needed</text>
+  </g>
+
+  <!-- RIGHT: Wrong layout -->
+  <g transform="translate(370, 70)">
+    <text x="140" y="0" text-anchor="middle" font-size="11" font-weight="bold" fill="#e76f51">✗ Wrong: [512, 128]</text>
+    
+    <!-- HBM tensor -->
+    <text x="10" y="22" font-size="9" fill="#666">dim 0 = 512, dim 1 = 128</text>
+    <rect x="10" y="30" width="260" height="50" fill="#fde8e4" stroke="#e76f51" stroke-width="1.5" rx="3"/>
+    <text x="140" y="52" text-anchor="middle" font-size="9" fill="#555">512 exceeds partition (max 128)</text>
+    <text x="140" y="66" text-anchor="middle" font-size="9" fill="#555">Must tile: 4 iterations of 128</text>
+    
+    <!-- SBUF layout — partial -->
+    <text x="10" y="105" font-size="9" fill="#666">SBUF: only 128 of 512 per iteration</text>
+    <g transform="translate(10, 112)">
+      <rect x="0" y="0" width="260" height="90" fill="none" stroke="#e76f51" stroke-width="1.5" rx="3"/>
+      <rect x="3" y="3" width="64" height="8" fill="#e76f51" opacity="0.5"/>
+      <rect x="3" y="13" width="64" height="8" fill="#e76f51" opacity="0.5"/>
+      <rect x="3" y="23" width="64" height="8" fill="#e76f51" opacity="0.5"/>
+      <rect x="3" y="33" width="64" height="8" fill="#e76f51" opacity="0.4"/>
+      <text x="130" y="53" text-anchor="middle" font-size="8" fill="#e76f51">128 of 512 loaded (iteration 1 of 4)</text>
+      <rect x="3" y="60" width="64" height="8" fill="#e76f51" opacity="0.4"/>
+      <rect x="3" y="70" width="64" height="8" fill="#e76f51" opacity="0.5"/>
+      <rect x="3" y="80" width="64" height="8" fill="#e76f51" opacity="0.5"/>
+      <!-- Greyed out remainder -->
+      <rect x="70" y="3" width="187" height="85" fill="#ddd" opacity="0.3" rx="2"/>
+      <text x="163" y="48" text-anchor="middle" font-size="8" fill="#999">unused free</text>
+      <text x="163" y="60" text-anchor="middle" font-size="8" fill="#999">dimension</text>
+    </g>
+    
+    <!-- Result -->
+    <text x="140" y="228" text-anchor="middle" font-size="10" font-weight="bold" fill="#e76f51">4× loop iterations required</text>
+    <text x="140" y="244" text-anchor="middle" font-size="9" fill="#555">Same data, same result, 4× slower</text>
+  </g>
+</svg>

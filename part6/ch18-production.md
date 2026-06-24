@@ -1,153 +1,115 @@
-# Putting it in production
+# From kernel to community
 
-*Fine-tune, deploy, serve. The last mile from optimized model to live traffic.*
+*You learned the general skill. The ecosystem is catching up.*
 
----
+This book teaches one thing: take a PyTorch model, compile it to Neuron hardware, profile it, and push its performance with NKI. That workflow works for any architecture — standard or custom, published or proprietary. You're not waiting for anyone to add support for your model.
 
-## The deployment stack
+But you're not working alone. HuggingFace, vLLM, and PyTorch's own TorchTitan each independently invested in Neuron support. They integrated torch_neuronx for their most popular architectures, wrote fused NKI kernels for attention and MLP layers, and validated performance on Trainium. If your model happens to be Llama or Mistral or Qwen, someone already did the optimization work for you.
 
-You've optimized your model through Parts I–V. Now you need to package it for real users. Neuron's production stack mirrors the GPU ecosystem — same libraries, different backend:
-
-| Stage | Library | What it does |
-|-------|---------|-------------|
-| Fine-tuning | **optimum-neuron** | HuggingFace Transformers API, LoRA, minimal code changes |
-| Serving | **vLLM Neuron plugin** | High-throughput LLM inference with continuous batching |
-| Training at scale | **TorchTitan** | Standard PyTorch distributed training (FSDP, TP, PP) |
+This chapter maps that ecosystem — not as a tutorial, but so you understand how your skills connect to production tooling.
 
 ---
 
-## Fine-tuning with optimum-neuron
+## The stack
 
-[optimum-neuron](https://huggingface.co/docs/optimum-neuron) wraps the HuggingFace Transformers API with Neuron-optimized kernels underneath. The workflow:
+| Layer | What it does | Who built it |
+|-------|-------------|--------------|
+| **torch_neuronx** | Compiles any PyTorch graph to Neuron hardware | AWS Neuron team |
+| **optimum-neuron** | Fine-tuning API for HuggingFace models on Neuron | HuggingFace |
+| **vLLM Neuron plugin** | High-throughput LLM serving on Neuron | vLLM community + AWS |
+| **TorchTitan** | Distributed training (FSDP, TP, PP) | PyTorch team |
 
-**Step 1: Load and format your dataset**
+Each layer builds on the one above it. optimum-neuron calls torch_neuronx internally. vLLM's Neuron backend uses the same compilation path you learned in Chapter 6. The NKI attention kernel inside vLLM uses the same APIs from Chapters 12–15.
 
-```python
-from datasets import load_dataset
-
-dataset = load_dataset("your-org/your-data")
-# Format for instruction tuning (chat template)
-```
-
-**Step 2: Fine-tune with LoRA**
-
-```python
-from optimum.neuron import NeuronTrainer, NeuronTrainingArguments
-from peft import LoraConfig
-
-lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"])
-
-training_args = NeuronTrainingArguments(
-    output_dir="./results",
-    num_train_epochs=3,
-    per_device_train_batch_size=4,
-    bf16=True,
-)
-
-trainer = NeuronTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=dataset["train"],
-    peft_config=lora_config,
-)
-trainer.train()
-```
-
-The code is nearly identical to standard Transformers fine-tuning — `NeuronTrainer` replaces `Trainer`, `NeuronTrainingArguments` replaces `TrainingArguments`. Under the hood, optimum-neuron integrates Neuron's compiled kernels for attention, MLP, and normalization layers.
-
-**Step 3: Consolidate LoRA adapters**
-
-```bash
-optimum-cli neuron consolidate --model ./results --output ./merged-model
-```
-
-**Step 4 (optional): Push to HuggingFace Hub**
-
-```python
-model.push_to_hub("your-org/your-model-neuron")
-```
+The key insight: these tools cover *common* architectures. When your model doesn't fit — a novel attention pattern, a custom activation, an architecture no one has ported yet — you fall back to the general skill this book teaches.
 
 ---
 
-## Serving with vLLM
+## Fine-tuning: optimum-neuron
 
-[vLLM](https://docs.vllm.ai/) is the standard open-source library for high-throughput LLM serving. The Neuron plugin provides:
+[optimum-neuron](https://huggingface.co/docs/optimum-neuron) wraps the HuggingFace Transformers API. You write standard LoRA fine-tuning code, swap `Trainer` for `NeuronTrainer`, and the library handles graph compilation and BF16 mixed precision underneath.
 
-- **Flash attention** — fused NKI kernel for the attention computation
-- **Fused QKV** — single kernel for query/key/value projection
-- **Speculative decoding** — draft model generates candidates, main model verifies in batch
+The compiled graphs use the same operator fusion and tiling you saw in Chapters 3–5. When you profile a fine-tuning run with Neuron Explorer, you see the same NEFF execution and DMA patterns from Chapter 10. The abstraction is thin — one layer above the torch_neuronx path you already know.
+
+---
+
+## Serving: vLLM on Neuron
+
+[vLLM](https://docs.vllm.ai/) handles LLM inference with continuous batching, paged KV cache, and speculative decoding. The Neuron plugin provides:
+
 - **Continuous batching** — new requests join mid-generation without waiting
-- **Paged attention** — efficient KV cache management (no fragmentation)
+- **Paged KV cache** — virtual-memory management avoids HBM fragmentation
+- **Speculative decoding** — draft model proposes tokens, main model verifies in one forward pass
+- **Fused NKI kernels** — attention and MLP operators written in NKI
 
-Supported models: Llama, Qwen, GPTOSS, Mistral, DeepSeek (and growing).
+That last point matters. vLLM's Neuron attention kernel is NKI code — the same language from Parts IV–V. When you read the [Neuron Kernel Library source](https://github.com/aws-neuron/neuron-kernel-library), you'll see `nki.language` APIs, tile arithmetic, and SBUF/PSUM patterns from this book.
 
 ```python
 from vllm import LLM, SamplingParams
 
-sampling = SamplingParams(temperature=0.7, max_tokens=512)
-
 llm = LLM(
-    model="your-org/your-model-neuron",
-    tensor_parallel_size=2,  # Shard across 2 NeuronCores
+    model="meta-llama/Llama-3.1-8B",
+    tensor_parallel_size=2,  # shard across 2 chips (Ch17's column-parallel split)
 )
-
-outputs = llm.generate(["Summarize the mechanism of action of..."], sampling)
+outputs = llm.generate(["Summarize:"], SamplingParams(max_tokens=256))
 ```
 
-That's it. Same API as GPU vLLM. The `tensor_parallel_size` parameter controls how many NeuronCores share the model weights — same concept as GPU tensor parallelism.
+vLLM supports specific architectures — Llama, Mistral, Qwen, DeepSeek, and others. If your model isn't on that list, vLLM won't serve it out of the box. That's where contribution comes in.
 
 ---
 
-## Training at scale with TorchTitan
+## Contributing back
 
-For pre-training or full fine-tuning at scale, [TorchTitan](https://github.com/pytorch/torchtitan) is a standard PyTorch training library that works on Neuron out of the box:
+The ecosystem tools are open source. If you optimize a model for Neuron, you can upstream it:
 
-- 10+ model architectures supported (Llama, GPT, etc.)
-- FSDP, TP, PP, CP, EP — all via standard PyTorch APIs
-- No Neuron-specific code — upstream contributions for portability
-- Dense models reach >50% MFU on Trn2
+**Adding a model to vLLM.** vLLM maintains its own model implementations (separate from HuggingFace's `modeling_*.py`). To add Neuron support for a new architecture, you write a model class that uses vLLM's abstractions (paged attention, tensor-parallel linear layers) and register it in vLLM's architecture registry. Your NKI profiling skills tell you where fused kernels are needed; your kernel-writing skills let you implement them.
 
----
+**Contributing kernels to Neuron Kernel Library.** NKL is the collection of pre-optimized NKI kernels that vLLM and optimum-neuron use internally. If you write a faster attention variant, a fused activation, or a custom normalization kernel, it can land in NKL and benefit every serving deployment that uses it.
 
-## The two inference modes
+**Publishing optimized checkpoints.** After fine-tuning with optimum-neuron, you can push compiled model artifacts to HuggingFace Hub. Other Neuron users skip the compilation step entirely — they download your pre-compiled checkpoint and serve it directly.
 
-For production serving, you choose between two optimization targets:
-
-| Mode | Optimize for | Use case |
-|------|-------------|----------|
-| **Latency-optimized** | Time to first token, tokens/second per user | Interactive chat, coding assistants |
-| **Throughput-optimized** | Total tokens/second across all users | Batch processing, RL reward models, offline eval |
-
-The hardware is the same — the difference is in batching strategy, KV cache allocation, and scheduling policy. vLLM handles this via configuration.
+The path from "I optimized this for my workload" to "everyone on Neuron benefits" is a pull request.
 
 ---
 
-## The full lifecycle
+## Where your skills plug in
 
-```
-Select model (open-weight, HuggingFace)
-    │
-    ▼
-Fine-tune (optimum-neuron, LoRA, Trn2)
-    │
-    ▼
-Profile (Neuron Explorer — is attention optimized?)
-    │
-    ▼
-Optimize (torch.compile → NKI if needed)
-    │
-    ▼
-Deploy (vLLM Neuron plugin, tensor parallelism)
-    │
-    ▼
-Monitor & iterate (latency, throughput, cost)
-```
+The production stack handles plumbing. Your job as a performance engineer is to fix the bottlenecks generic tools can't:
 
-```{admonition} The open-source commitment
-:class: note
-The entire Neuron developer stack is being open-sourced: NKI compiler, torch-neuronx backend, Neuron Kernel Library (pre-optimized production kernels), and all vLLM/HuggingFace plugins. You're never locked into a proprietary toolchain.
-```
+**Profiling a serving workload.** vLLM gives you throughput numbers. Neuron Explorer tells you *why* throughput plateaus. If prefill latency dominates, you'll see it in the attention operator's compute utilization. If decode is memory-bound, you'll see low arithmetic intensity in the MLP layers — the roofline from Chapter 9.
+
+**Custom kernels in production.** vLLM's NKI attention kernel handles standard multi-head attention. Models with non-standard patterns (sliding window + global tokens, cross-document boundaries, mixture-of-experts routing) need custom implementations. You write them with the NKI workflow from Chapters 12–15, then register them as custom ops in vLLM's model class.
+
+**Number format choices.** Chapter 11 showed how BF16, FP8, and MX formats trade accuracy for throughput. In production, you pick the format per-layer: FP8 for dense MLP projections where quantization error is tolerable, BF16 for attention logits where precision matters. The profiler confirms whether your choice saturates compute or stays memory-bound.
 
 ---
 
-*This concludes the book. You started with `model(x)` as a black box and ended with instruction-level control over custom silicon. The path from data scientist to performance engineer is a ladder — each rung gives you more control and more performance. Climb as high as your workload demands.*
+## The lifecycle
+
+At each stage, a different part of this book applies:
+
+```
+Train or fine-tune (optimum-neuron, TorchTitan)
+       │
+       │  Chapters 3–5: compilation, graph breaks, operator fusion
+       ▼
+Profile (Neuron Explorer)
+       │
+       │  Chapters 9–10: roofline, profiler interpretation
+       ▼
+Optimize hotspots (torch.compile → NKI if needed)
+       │
+       │  Chapters 12–15: custom kernels, tiling, number formats
+       ▼
+Deploy (vLLM, tensor parallelism across chips)
+       │
+       │  Chapter 17: TP, all-gather, communication roofline
+       ▼
+Monitor, optimize, contribute upstream
+```
+
+Most models never need custom NKI kernels. The compiled defaults handle standard architectures. But when you hit a wall — or when you want to bring a new architecture to Neuron — you have the skills to do it yourself, and an open-source ecosystem ready to accept the result.
+
+---
+
+*You started this book treating `model(x)` as a black box. Now you can trace execution from Python through the compiler to individual tensor engine instructions. The tools transfer from GPUs, the ecosystem is open, and the path from personal optimization to community contribution is a pull request.*

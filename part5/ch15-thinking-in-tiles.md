@@ -2,6 +2,16 @@
 
 *ESM-2's weight matrices are 1280×1280. The tensor engine accepts 128×128. Break the problem into pieces.*
 
+```{admonition} Run it yourself
+:class: tip
+Scripts for this chapter (run on trn2.3xlarge with Neuron venv activated):
+
+- `scripts/ch15_vector_engine.py` — vector/scalar engine ops: element-wise, reductions, activations using `nisa`
+- `scripts/ch15_matmul_isa.py` — tensor engine matmul progression (single-tile → tiled → hoisted loads), benchmarked with `wrap_nki` + `synchronize()`
+
+`wrap_nki` + timing measures what your model actually sees through PyTorch's dispatch path — use it to A/B test kernel variants.
+```
+
 ---
 
 ## The 2D memory model
@@ -27,6 +37,23 @@ Partition  │         ...               │
 ```
 
 HBM is 1D (flat bytes). When you `nl.load()`, data goes from 1D HBM into this 2D layout. The first logical dimension maps to partition, everything else flattens into the free dimension.
+
+### The #1 mistake: wrong dimension on partition
+
+The partition dimension is fixed at 128. If your tensor's first dimension is larger than 128, you must tile over it — each tile processes 128 rows at a time. If it's smaller than 128, some lanes sit idle.
+
+The critical design decision: **which logical dimension of your data maps to partition?**
+
+```{figure} ../assets/partition_layout.svg
+:align: center
+:width: 90%
+
+Left: a [128, 512] tensor loads directly — 128 elements fill all partition lanes, 512 goes to the free dimension. Right: a [512, 128] tensor has 512 on partition — it overflows the 128 lanes and must be processed in 4 separate tiles. Same data, 4× more loop iterations.
+```
+
+The rule: **put the dimension you want to parallelize across on partition (dim 0), put the dimension you want to iterate over on free (dim 1).** For vector reductions (like computing a mean across features), features go on free and batch/sequence goes on partition — each lane reduces independently in parallel.
+
+When you get this wrong, the kernel still produces correct results. But it runs 4× slower (or worse) because you're serializing work that could be parallel. The profiler won't flag this as an error — it just shows lower throughput. This is the subtlest performance bug in NKI code.
 
 ---
 

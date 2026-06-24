@@ -6,6 +6,7 @@ that run natively on the Neuron tensor engine.
 
 Run on trn2.3xlarge:
     source /workshop/workspace/native_venv/bin/activate
+    pip install -e schnetpack
     python scripts/ch7_matmul_schnet.py
 """
 

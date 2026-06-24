@@ -91,7 +91,7 @@ The arithmetic intensity of a matmul is approximately equal to the batch size! W
 
 $$B > 230$$
 
-For a single NeuronCore-v3 in BF16. This is remarkably similar to TPUs (~240) and H100s (~295).
+For a single NeuronCore-v3 in BF16. This is similar to TPUs (~240) and H100s (~295).
 
 ### What this means in practice
 
@@ -120,12 +120,12 @@ Let's apply this to our running example. In ESM-2 with seq_len=32, heads=20, hea
 
 **QK^T matmul** (per head): $[32, 64] \times [64, 32]$
 - FLOPs: $2 \times 32 \times 64 \times 32 = 131,072$
-- Bytes: $2(32×64) + 2(64×32) + 2(32×32) = 8192 + 8192 + 2048 = 18,432$
-- Intensity: $131,072 / 18,432 = 7.1$ → **memory-bound**
+- Bytes: $2(32×64) + 2(32×64) + 2(32×32) = 4,096 + 4,096 + 2,048 = 10,240$
+- Intensity: $131,072 / 10,240 = 12.8$ → **memory-bound**
 
 **QK^T matmul** (seq_len=512): $[512, 64] \times [64, 512]$
 - FLOPs: $2 \times 512 \times 64 \times 512 = 33,554,432$
-- Bytes: $2(512×64) + 2(64×512) + 2(512×512) = 65,536 + 65,536 + 524,288 = 655,360$
+- Bytes: $2(512×64) + 2(512×64) + 2(512×512) = 65,536 + 65,536 + 524,288 = 655,360$
 - Intensity: $33,554,432 / 655,360 = 51.2$ → **still memory-bound** (but much better)
 
 **FFN matmul**: $[512, 1280] \times [1280, 5120]$
@@ -135,22 +135,39 @@ Let's apply this to our running example. In ESM-2 with seq_len=32, heads=20, hea
 
 Key insight: the FFN layers (large weight matrices) are compute-bound and efficient. The attention QK^T computation is memory-bound at typical sequence lengths — this is why flash attention and fused attention kernels matter.
 
+```{admonition} Exercise: SchNet's interaction layer
+:class: tip
+
+In Chapter 7, SchNet's linear projection is `[N_atoms, 128] × [128, 128]` with N_atoms=20. Apply the formula:
+
+- FLOPs: $2 \times 20 \times 128 \times 128 = 655,360$
+- Bytes loaded: $2(20 \times 128) + 2(128 \times 128) + 2(20 \times 128) = 5,120 + 32,768 + 5,120 = 43,008$
+- Intensity: $655,360 / 43,008 = 15.2$ → **memory-bound**
+
+Now you see why SchNet on Neuron is hard: even the "good" ops (linear projections) are memory-bound because molecular graphs have few atoms (small B). The scatter/gather ops are worse still — they have intensity ~1. The matmul reformulation from Ch7 doesn't change the intensity of the linear layers, but it eliminates the scatter ops entirely by replacing them with a tensor-engine matmul.
+```
+
 ---
 
 ## Network communication rooflines (multi-chip)
 
-When you shard a model across multiple NeuronCores (Ch 17), a new roofline emerges. After computing partial results, chips must exchange data via NeuronLink.
+When you shard a model across multiple chips (Ch 17), a new roofline emerges. After computing partial results, chips must exchange data via NeuronLink.
 
-Example: a matmul sharded along the contraction dimension across 2 chips. Each chip computes half, then they all-reduce the partial sums.
+In tensor parallelism (TP), each chip holds the full input X and one shard of the weight matrix W. After computing its local slice of the output, an all-gather sends each chip's partial result to every other chip. The communication roofline asks: is the matmul large enough that compute takes longer than the all-gather?
 
-- $T_\text{math}$: halved (each chip does half the FLOPs)
-- $T_\text{comms}$: $\frac{2BF}{\text{NeuronLink bandwidth}}$
+Cancel common terms and you get the minimum hidden dimension D for TP to stay compute-bound:
 
-The critical threshold now depends on **D** (model dimension), not B:
+$$D > (P-1) \times \frac{\text{bytes per element} \times \text{FLOPs/s per chip}}{\text{NeuronLink bandwidth}}$$
 
-$$D > \frac{2 \times \text{FLOPs/s per chip}}{\text{NeuronLink bandwidth}} = \frac{2 \times 83.4 \text{ TFLOPS}}{1.28 \text{ TB/s}} \approx 130,000$$
+On Trn2 (632 BF16 TFLOPS per chip, 1.28 TB/s NeuronLink, 2 bytes per BF16 element):
 
-Since D is typically 4096–16384, sharded matmuls are often **communication-bound**. This is why tensor parallelism has diminishing returns beyond a few chips — and why NeuronLink bandwidth matters so much for distributed training.
+| TP degree (P) | D must exceed | Llama-7B (D=4096) | Llama-70B (D=8192) |
+|---------------|---------------|--------------------|--------------------|
+| 2 | 988 | ✓ compute-bound | ✓ compute-bound |
+| 4 | 2,962 | ✓ compute-bound | ✓ compute-bound |
+| 8 | 6,912 | ✗ comm-bound | ✓ compute-bound |
+
+Most models have enough hidden dimension for TP degree 2–4. Push to 8 chips and smaller models hit the communication wall. More details in Chapter 17.
 
 ---
 
@@ -170,7 +187,7 @@ Most NKI kernel optimization (Part V) operates in the memory-bound regime — th
 
 ## The roofline is a ceiling, not a floor
 
-The roofline represents 100% hardware utilization — you never actually reach it. Real performance falls below due to:
+The roofline represents 100% hardware utilization. You never reach it. Real performance falls below due to:
 
 - Tiling overhead (not all tiles are perfectly sized)
 - Pipeline bubbles (first/last tile don't overlap)
@@ -178,18 +195,13 @@ The roofline represents 100% hardware utilization — you never actually reach i
 - Memory bank conflicts
 - Compiler scheduling inefficiency
 
-The profiler (next chapter) shows you *where* on the roofline you actually sit and the gap between actual and theoretical tells you how much optimization opportunity remains.
+The profiler (next chapter) shows you *where* on the roofline you sit. The gap between measured and theoretical tells you how much optimization opportunity remains.
 
 ---
 
 ## Sustained vs. peak: what the spec sheet doesn't tell you
 
-The roofline uses *peak* hardware specs: 667 TFLOPS, 2.9 TB/s. But peak is a sprint — real training is a marathon.
-
-```{admonition} Sprinter vs. marathoner
-:class: tip
-Peak TFLOPS is the sprinter's 100m time. Sustained MFU is the marathoner's pace over 42km. AI training is a marathon — what matters is the pace you can hold for hours.
-```
+The roofline uses *peak* hardware specs: 667 TFLOPS, 2.9 TB/s. But AI training is more of a marathon than a sprint — peak is what the chip can sustain for a single instruction under ideal conditions, while real workloads run for hours across thousands of iterations.
 
 Why sustained performance falls below peak:
 - **Non-matmul ops block the tensor engine** — softmax, layer norm, and activations occupy vector/scalar engines while the tensor engine waits
@@ -208,4 +220,4 @@ The gap between your current MFU and the roofline ceiling is your optimization b
 
 ---
 
-*I can estimate where my model should sit. But how do I actually measure where it is? How do I see inside the chip while it's running?*
+*I can estimate where my model should sit. But how do I measure where it is? How do I see inside the chip while it's running?*

@@ -1,6 +1,6 @@
 # What actually happens when you call `model(x)`
 
-If you are reading this book, chances are that you have written `model(x)` thousands of times. You know it runs a forward pass, but do you understand the machinery? Which runtime activates? What work gets scheduled on hardware? Most ML engineers treat this as a black box, and often times, you might actually get away with that. But to really understand how to make the best use of your accelerator, you will need to understand the machinery in more details: The best software is written when it's tailor-made for the hardware. This is especially true for accelerator chips such as Neuron. 
+If you are reading this book, you've written `model(x)` thousands of times. You know it runs a forward pass, but which runtime activates? What work gets scheduled on hardware? Most ML engineers treat this as a black box. That works fine until you need performance. On accelerator chips like Neuron, understanding the machinery underneath is what separates "it runs" from "it runs fast."
 
 ## Example: Running ESM-2 with PyTorch
 
@@ -67,6 +67,13 @@ for e in sorted(events, key=lambda e: e.cpu_time_total, reverse=True)[:10]:
 ```{admonition} Observation
 :class: important
 ESM-2 (650M params, 33 layers) decomposes into just a handful of ATen ops repeated hundreds of times. These are operations such as additions, transposes, views, multiplications.
+```
+
+```{figure} ../assets/pytorch.png
+:align: center
+:width: 80%
+
+The PyTorch software stack. Your `model(x)` call goes through the Python API, decomposes into ATen operations (the `aten::` names in the profiler above), and dispatches to hardware-specific kernels.
 ```
 
 Everything above ran on CPU, PyTorch's default device. Now let's move this to Neuron. The model code doesn't change, we just move the tensors:
@@ -356,44 +363,6 @@ Manual attention:                     Fused SDPA:
 import torch
 import torch.nn.functional as F
 
-class ESMAttentionManual(torch.nn.Module):
-    """Exactly what one ESM-2 attention layer does, using raw ATen ops."""
-    
-    def __init__(self, d_model=1280, n_heads=20):
-        super().__init__()
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads  # 64
-        self.scale = self.d_head ** -0.5
-        self.q_proj = torch.nn.Linear(d_model, d_model)
-        self.k_proj = torch.nn.Linear(d_model, d_model)
-        self.v_proj = torch.nn.Linear(d_model, d_model)
-        self.out_proj = torch.nn.Linear(d_model, d_model)
-    
-    def forward(self, x, attention_mask=None):
-        B, L, D = x.shape
-        
-        # Op 1: aten::addmm (linear projection)
-        Q = self.q_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
-        K = self.k_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
-        V = self.v_proj(x).view(B, L, self.n_heads, self.d_head).transpose(1, 2)
-        
-        # Op 2: aten::matmul (Q @ K^T)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-        
-        # Op 3: aten::masked_fill
-        if attention_mask is not None:
-            scores = scores.masked_fill(attention_mask == 0, float('-inf'))
-        
-        # Op 4: aten::softmax
-        attn_weights = torch.softmax(scores, dim=-1)
-        
-        # Op 5: aten::matmul (attn @ V)
-        context = torch.matmul(attn_weights, V)
-        context = context.transpose(1, 2).contiguous().view(B, L, D)
-        
-        # Op 6: aten::addmm (output projection)
-        return self.out_proj(context)
-
 class ESMAttentionFused(torch.nn.Module):
     """Same math as ESMAttentionManual, but using the fused SDPA op."""
     
@@ -418,7 +387,7 @@ class ESMAttentionFused(torch.nn.Module):
         context = context.transpose(1, 2).contiguous().view(B, L, D)
         return self.out_proj(context)
 
-# Compare op counts
+# Compare op counts — reusing ESMAttentionManual from above
 manual_attn = ESMAttentionManual(d_model=1280, n_heads=20).eval()
 fused_attn = ESMAttentionFused(d_model=1280, n_heads=20).eval()
 

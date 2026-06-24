@@ -49,9 +49,21 @@ This is the deepest reason to learn NKI: not just "implement the missing op" but
 
 ## When NOT to write a kernel
 
-- **Don't optimize what already works well.** Profile first. If the compiler gives you 80% MFU, a kernel won't help much.
-- **Don't write a kernel just because a GPU version exists.** The hardware is completely different. GPU bottlenecks may not exist on Neuron, and vice versa.
-- **Don't start at the keyboard.** Start at the whiteboard: What am I trying to do? What shapes? What's the theoretical best time? (roofline from Ch 9). Only then write code.
+```{admonition} When NOT to write a kernel (most of the time)
+:class: warning
+
+`torch.compile` handles 90% of workloads. Before writing NKI, confirm all three:
+
+1. **You profiled** and identified a specific op that's the bottleneck (not a vague "it's slow")
+2. **The compiler can't fix it** — the op falls back to CPU, or the profiler shows a fusion the compiler missed
+3. **The theoretical gain justifies the effort** — use roofline math (Ch 9) to estimate the speedup ceiling. If it's < 2×, the compiler is probably good enough.
+
+If the compiler already gives you 60%+ MFU on the hot path, a custom kernel will squeeze out incremental gains at high engineering cost. NKI pays off when there's a large gap between actual and theoretical performance — a CPU fallback, a missing fusion, or an algorithm the compiler can't discover.
+```
+
+Additional guidelines:
+- **Don't write a kernel just because a GPU version exists.** The hardware is different. GPU bottlenecks may not exist on Neuron, and vice versa.
+- **Don't start at the keyboard.** Start at the whiteboard: what shapes, what's the theoretical best time (roofline from Ch 9), which engine should dominate? Only then write code.
 
 ```{admonition} The one rule of kernel engineering
 :class: important

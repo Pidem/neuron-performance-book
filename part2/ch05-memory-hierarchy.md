@@ -1,8 +1,8 @@
 # The memory hierarchy
 
-In Chapter 4, we saw the Neuron Explorer timeline: three matmul waves with gaps between them. The tensor engine was idle during those gaps — waiting for data. The compiler already fused everything into one NEFF. So why is there still idle time?
+In Chapter 4, we saw the Neuron Explorer timeline: three matmul waves with gaps between them. The tensor engine was idle during those gaps, waiting for data. The compiler already fused everything into one NEFF. So why is there still idle time?
 
-The answer is memory. Compute is cheap; moving data is expensive. This chapter builds the mental model for *where* data lives and *how* it moves — the foundation for everything that follows.
+The answer is memory. Compute is cheap; moving data is expensive. This chapter builds the mental model for *where* data lives and *how* it moves.
 
 ---
 
@@ -52,7 +52,7 @@ Q/K/V projection weights: 3 × [1280, 1280] × 2 bytes = 9.8 MB  ← tight fit
 Output projection: [1280, 1280] × 2 bytes = 3.3 MB
 ```
 
-For our small ESM-2 (seq_len=32), the activations fit comfortably. The weights are the bottleneck — they must be streamed through SBUF in tiles. For longer sequences or larger models, even activations spill to HBM.
+For our small ESM-2 (seq_len=32), the activations fit comfortably. The weights are the bottleneck: they must be streamed through SBUF in tiles. For longer sequences or larger models, even activations spill to HBM.
 
 ---
 
@@ -74,7 +74,7 @@ Data doesn't teleport between HBM and SBUF. Each NeuronCore has **16 DMA engines
 
 DMA engines have three important properties:
 
-**1. They operate on contiguous addresses only.** A single DMA buffer can only move a contiguous block of memory. This is why tensor contiguity (Chapter 2) matters at the hardware level — a contiguous tensor is one DMA instruction; a strided tensor forces many tiny transfers.
+**1. They operate on contiguous addresses only.** A single DMA buffer can only move a contiguous block of memory. This is why tensor contiguity (Chapter 2) matters at the hardware level: a contiguous tensor is one DMA instruction; a strided tensor forces many tiny transfers.
 
 **2. They run independently of compute.** While the tensor engine multiplies tiles, DMA engines can simultaneously load the *next* set of tiles. This overlap is the key to performance. The goal is to keep the TensorEngine busy !
 
@@ -204,16 +204,7 @@ The ultimate optimization is to never touch HBM during the forward pass at all. 
 
 For large models this isn't possible for the full model — but for individual operations it is. A fused attention kernel that keeps Q, K, V, and the attention scores entirely in SBUF (no intermediate HBM writes) is dramatically faster than one that spills intermediates. This is what FlashAttention achieves on GPU, and what NKI attention kernels achieve on Neuron.
 
-An internal Amazon team achieved **80% MFU** by designing their training pipeline to keep activations in SRAM the entire time, using SRAM-to-SRAM collectives between chips that skip HBM round-trips entirely. That's the ceiling — and it's achievable when you control the full stack.
-
-```{admonition} How SRAM-to-SRAM collectives work
-:class: note
-The default collective path is: SBUF → DMA → HBM → collective → HBM → DMA → SBUF. That's three memory hops each way. In latency-sensitive decode (streaming tokens one at a time), those extra hops dominate.
-
-Neuron hardware supports **direct SRAM-to-SRAM collectives** that skip HBM entirely. In the profiler, you can see the difference: without direct collectives, the GPSIMD engine spends all its time writing DMA descriptors for the intermediate memory movements between SBUF and HBM. With direct collectives, those descriptor-writing operations disappear entirely — the collective fires straight from on-chip memory to on-chip memory on the neighboring chip, and the latency drops dramatically.
-
-Anthropic uses this in their LLM decode kernels to minimize per-token latency on sharded models.
-```
+An internal Amazon team achieved **80% MFU** by designing their training pipeline to keep activations in SRAM the entire time, using SRAM-to-SRAM collectives between chips that skip HBM round-trips entirely. That's the ceiling — and it's achievable when you control the full stack (more on this in Chapter 17).
 
 ---
 

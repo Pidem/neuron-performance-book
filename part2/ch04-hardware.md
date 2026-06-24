@@ -1,6 +1,8 @@
 # Hardware deep dive
 
-In Chapter 3, we saw the compiler collapse 1,050 NEFFs into one. But what hardware does that NEFF actually run on? In this chapter, we dive into the NeuronCore architecture.
+In Chapter 3, the compiler collapsed 1,050 NEFFs into one. A single binary that fuses dozens of operations, eliminates intermediate memory writes, and reshapes data for maximum throughput. Impressive, but throughput of *what*, exactly? What silicon is actually executing that NEFF? How many multiply-accumulate units fire per cycle? Where do the tensors physically live between operations?
+
+To reason about performance (to know whether you're leaving 10% or 90% of the hardware idle) you need a mental model of the chip itself.
 
 ```{admonition} Production silicon, not research prototype
 :class: note
@@ -11,7 +13,7 @@ AWS is one of TSMC's top 5 customers for advanced process nodes. Unlike typical 
 
 ## The NeuronCore architecture
 
-If you're coming from the CUDA world, here's what you're used to a world of many small Stream Multiprocessors (SMs) following the SIMT model: Thousands of indepedendent threads execute the same instruction. Each SM has only a small shared memory (~100-200 KB) and the main philosophy is that the massive parallelism compensates. The GPU bet is basically to throw enough threads at the problem and latency will disappear: If thousands of other threads keep the hardware busy while some stall, you are utilizing your compute well. 
+If you're coming from the CUDA world, you're used to many small Stream Multiprocessors (SMs) following the SIMT model. Thousands of independent threads execute the same instruction. Each SM has only a small shared memory (~100-200 KB) and the philosophy is that massive parallelism compensates. The GPU bet is to throw enough threads at the problem and latency disappears: if thousands of other threads keep the hardware busy while some stall, you are utilizing your compute well.
 
 Neuron makes the opposite architectural design choice: *dedicate die area to massive compute engines and fast on-chip memory, not thread management.*
 
@@ -87,22 +89,11 @@ If an operation doesn't map naturally to one of these engines (if it requires ra
 | NeuronLink (chip-to-chip) | 1.28 TB/s |
 | CC-Cores (collectives) | 16 |
 
-### Peak vs. sustained: the sprinter and the marathoner
+### Peak vs. sustained
 
-Those spec numbers are *peak* performance — what the chip can sustain for a single instruction under ideal conditions. Real workloads are marathons, not sprints.
+Those spec numbers are *peak* performance, what the chip sustains for a single instruction under ideal conditions. Real workloads sustain less because non-matmul ops block the tensor engine, tiles don't always fill the 128×128 array perfectly, and memory bank shuffles cost cycles.
 
-```{admonition} The sprinter vs. marathoner analogy
-:class: tip
-A sprinter runs faster than a marathoner over 100m. But a marathoner wins the race that matters. AI training is a marathon — what matters is *sustained* throughput over hours, not peak FLOPs for one instruction.
-```
-
-Why sustained < peak:
-- **Softmax and other non-matmul ops** block the tensor engine between matmuls
-- **Tiling inefficiencies** — not all tile shapes perfectly fill the 128×128 systolic array
-- **Memory bank shuffles** — data in the wrong SBUF partition must be reorganized
-- **Thermal and power delivery** — real racks under full load for hours
-
-What "good" looks like: a customer doing real-time video generation recently exceeded **80% MFU** (Model FLOPs Utilization) sustained on Trainium 3. Getting from 30% MFU (naive eager) to 60% (torch.compile) to 80%+ (NKI-optimized) is the journey this book teaches.
+What "good" looks like: a customer doing real-time video generation recently exceeded **80% MFU** sustained on Trainium 3. Getting from 30% MFU (naive eager) to 60% (torch.compile) to 80%+ (NKI-optimized) is the journey this book teaches.
 
 ---
 

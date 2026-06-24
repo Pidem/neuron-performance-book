@@ -4,20 +4,15 @@
 
 ## Who is this for?
 
-You're a scientist or ML engineer working with biological foundation models. You train protein language models, molecular property predictors, or clinical NLP systems. You're comfortable with PyTorch and Python — but you've never thought about *why* your training takes the time it does, or what's actually happening on the hardware underneath.
+You're a scientist or ML engineer working with biological foundation models. You train protein language models, molecular property predictors, or clinical NLP systems. You're comfortable with PyTorch and Python, but you've never thought about *why* your training takes the time it does, or what's actually happening on the hardware underneath.
 
-You want to make sure you're using your Neuron chip to its full potential. This book teaches you how.
+This book is for ML engineers who want to close that gap on AWS Neuron chips. The examples use examples from the Healthcare & Life Sciences space, but the concepts apply to any deep learning workload: LLMs, vision models, diffusion, multimodal. 
+
+No hardware background required. 
 
 ## What you'll learn
 
-This book takes you from "I can call `model(x)`" to "I understand why my kernel is memory-bound on NeuronCore-v3 and I know how to fix it." We do this incrementally — each chapter peels back one layer of abstraction, and each chapter ends with a question that the next one answers.
-
-```{admonition} The optimization ladder
-:class: tip
-**Eager** (get it running) → **torch.compile** (graph-level optimization) → **NKI** (hand-written hardware instructions)
-```
-
-Getting close to the chip's theoretical peak performance means turning different knobs — from how the compiler organizes your operations, to how data moves through memory, to how individual instructions are scheduled on hardware. Each knob gives you more control:
+Every chapter comes with code you can run on a Trainium instance. You start by profiling a model you already know, then peel back layers: how the compiler organizes your ops, how data moves through memory, how instructions land on hardware. At each step, understanding the hardware a little better lets you write slightly better software — until you're writing kernels that extract 80% of the chip's theoretical peak.
 
 | Level | What you write | What changes | Typical MFU |
 |-------|---------------|--------------|-------------|
@@ -31,13 +26,14 @@ Each level requires more knowledge but delivers more performance. This book take
 
 ## How to use this book
 
-- **Read linearly** — chapters build on each other
-- **Run the notebooks** — every concept has runnable code on a `trn2.3xlarge`
-- **Skip to your level** — if you already know PyTorch internals, start at Part II
+- **Parts I–II** — PyTorch internals and Neuron hardware (start here)
+- **Part III** — Measuring performance: roofline models, the profiler
+- **Parts IV–V** — Optimizing: number formats, then custom NKI kernels
+- **Part VI** — Scaling out and production
 
 ## Hardware setup
 
-All code in this book have been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
+All code in this book has been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
 
 ```{figure} assets/trn2_chip.png
 :alt: Trainium2 chip

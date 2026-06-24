@@ -16,7 +16,7 @@ The original SchNetPack library is open source: [github.com/atomistic-machine-le
 
 ## The Model: SchNet
 
-SchNet is a message-passing neural network for predicting molecular properties — energies, forces, potential energy surfaces. It's the workhorse of computational chemistry: drug discovery, materials science, and molecular dynamics all rely on architectures like this.
+SchNet is a message-passing neural network for predicting molecular properties such as energies, forces, and potential energy surfaces. It's the workhorse of computational chemistry: drug discovery, materials science, and molecular dynamics all rely on architectures like this.
 
 Each interaction layer does three things:
 
@@ -33,11 +33,11 @@ def forward(self, x, f_ij, idx_i, idx_j, rcut_ij):
     return x
 ```
 
-The linear projections and element-wise ops are fine on any hardware. The **gather** (`x[idx_j]`) and **scatter_add** are the problem — they require indirect memory access that the NeuronCore's tensor engine can't do natively.
+The linear projections and element-wise ops are fine on any hardware. The **gather** (`x[idx_j]`) and **scatter_add** are the problem as they require indirect memory access that the NeuronCore's tensor engine can't do natively.
 
 ---
 
-## Move to Neuron — it just works (slowly)
+## Move to Neuron: it works (slowly)
 
 ```python
 model = SchNet(n_atom_basis=128, n_interactions=6, ...).eval()
@@ -58,7 +58,7 @@ Fallback overhead: 22.7% of forward pass
 
 Every interaction layer triggers two CPU fallbacks plus the PCIe data transfers to move tensors back and forth. The tensor engine sits idle while the CPU handles these ops.
 
-`torch.compile` helps — it fuses the linear/activation sequences between fallbacks — but can't eliminate the fallbacks themselves:
+`torch.compile` helps by fusing the linear/activation sequences between fallbacks but can't eliminate the fallbacks themselves:
 
 | Mode | Time | vs Eager |
 |------|------|----------|
@@ -114,7 +114,7 @@ x_j = x[idx_j]
 #         [3., 4.]])  ← x[1], edge 5 reads from atom 1
 ```
 
-This is **fancy indexing** — non-contiguous memory access. The hardware chases pointers into random locations of x. On Neuron, this falls back to CPU because the DMA engines only handle contiguous blocks.
+This is **fancy indexing** causing non-contiguous memory access. The hardware chases pointers into random locations of x. On Neuron, this falls back to CPU because the DMA engines only handle contiguous blocks.
 
 ### Scatter-add: `index_add_(0, idx_i, x_ij)`
 
@@ -136,7 +136,7 @@ out.index_add_(0, idx_i, x_ij)
 #         [0.2, 0.3]])  ← edge 5 into atom 3
 ```
 
-This is a **reduction with irregular grouping** — multiple edges write to the same atom. The hardware must handle atomic accumulation into arbitrary positions. Also falls back to CPU.
+This is a **reduction with irregular grouping** :  multiple edges write to the same atom. The hardware must handle atomic accumulation into arbitrary positions and this operation also falls back to CPU
 
 ---
 
@@ -207,7 +207,7 @@ x_ij = x_j * Wij                  # element-wise (unchanged)
 out = A @ x_ij                    # scatter: [N×E] @ [E×F] → [N×F]
 ```
 
-Both produce **identical outputs**. The matmul version just expresses indexing logic as matrix multiplication with binary (0/1) matrices.
+Both produce **identical outputs**. The matmul version expresses indexing logic as matrix multiplication with binary (0/1) matrices.
 
 ```{admonition} Why does this help?
 :class: tip
@@ -218,7 +218,7 @@ Both produce **identical outputs**. The matmul version just expresses indexing l
 | Scatter | CPU fallback (atomic reduction) | Tensor engine GEMM |
 | Compiler | Can't fuse across fallbacks | Fuses entire layer into one NEFF |
 
-The tensor engine is 90% of your available FLOPs. Feeding it work — even "wasteful" dense matmuls over sparse binary matrices — beats falling back to CPU.
+The tensor engine is 90% of your available FLOPs. Feeding it work, even "wasteful" dense matmuls over sparse binary matrices, beats falling back to CPU.
 ```
 
 ### End-to-end verification
@@ -289,7 +289,7 @@ Compiled matmul-reformulated SchNet vs the original, on trn2.3xlarge:
 | 200 atoms, 6K edges | 8.32ms | 15.98ms | 1.45ms | **5.7×** | 11× |
 | 500 atoms, 20K edges | 33.09ms | 41.66ms | 2.83ms | **11.7×** | 14.7× |
 
-The original compiled model is *slower than CPU* at every scale because of scatter/gather fallbacks. The matmul reformulation eliminates all fallbacks, letting the compiler fuse the entire interaction layer — and the speedup grows with molecule size because larger matmuls better utilize the systolic array.
+The original compiled model is *slower than CPU* at every scale because of scatter/gather fallbacks. The matmul reformulation eliminates all fallbacks, letting the compiler fuse the entire interaction layer and the speedup grows with molecule size because larger matmuls better utilize the systolic array.
 
 ```{admonition} Why the scaling is superlinear
 :class: note
@@ -326,7 +326,7 @@ The G and A matrices must be rebuilt when the neighbor list changes. In molecula
 :class: important
 If the tensor engine can't do your operation directly, ask: **can I reformulate it as something it CAN do?**
 
-The tensor engine is a systolic array. It does one thing: multiply matrices. Everything else — scatter, gather, sort, argmax, custom reductions — either falls back to CPU or runs on the much weaker scalar/vector engines.
+The tensor engine is a systolic array. It does one thing: multiply matrices. Everything else (scatter, gather, sort, argmax, custom reductions) either falls back to CPU or runs on the much weaker scalar/vector engines.
 
 Feeding the tensor engine "wasteful" dense matmuls over sparse binary data often beats the alternative of falling back to CPU. The math is the same. The hardware utilization is completely different.
 ```
@@ -355,4 +355,4 @@ The lesson: **correctness is free, performance requires understanding.** The com
 
 ---
 
-*Next: we'll look at how to measure where time actually goes at the hardware level — is it compute-bound or memory-bound? The profiling tools that answer this question.*
+*Next: we'll look at how to measure where time goes at the hardware level: is it compute-bound or memory-bound?*

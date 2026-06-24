@@ -2,6 +2,15 @@
 
 *Fine-tune ESM-2 in mixed precision. What stays in BF16? What can go to FP8?*
 
+```{admonition} Run it yourself
+:class: tip
+Script for this chapter (run on trn2.3xlarge with Neuron venv activated):
+
+- `scripts/ch12_mixed_precision.py` — BF16 vs FP16 range, AMP autocast allowlist, the outlier problem, microscaling, FP8 throughput, and the shifted bottleneck
+
+Shows the full precision story: from "why BF16 just works" through "why 2× FP8 matmul doesn't give 2× end-to-end" (the insight from Ron Diamant's re:Invent 2025 talk on Trn3).
+```
+
 ---
 
 ## Mixed precision: the idea
@@ -60,7 +69,7 @@ for batch in dataloader:
     optimizer.step()
 ```
 
-Why does `GradScaler` exist for FP16 but not BF16? FP16's dynamic range maxes out at 65,504 — gradients in deep networks can easily exceed this and overflow to infinity. The scaler multiplies the loss by a large factor before backward (keeping gradients in representable range), then divides gradients back down before the optimizer step. BF16 shares FP32's full dynamic range (±3.4×10³⁸), so overflow essentially never happens and no scaler is needed. On Neuron, BF16 is the default — you won't need `GradScaler`.
+Why does `GradScaler` exist for FP16 but not BF16? FP16's dynamic range maxes out at 65,504 — gradients in deep networks can easily exceed this and overflow to infinity. The scaler multiplies the loss by a large factor before backward (keeping gradients in representable range), then divides gradients back down before the optimizer step. BF16 shares FP32's full dynamic range (±3.4×10³⁸), so overflow never happens in practice and no scaler is needed. On Neuron, BF16 is the default — you won't need `GradScaler`.
 
 What `autocast` does:
 - Matmuls and convolutions → BF16 (tensor engine inputs)
@@ -169,18 +178,23 @@ For ESM-2 on protein contact prediction:
 
 ---
 
-## Summary: the precision ladder on Neuron
+## The shifted bottleneck
 
-| Stage | Weights | Activations | Optimizer | Use case |
-|-------|---------|-------------|-----------|----------|
-| **FP32 baseline** | FP32 | FP32 | FP32 | Reference accuracy |
-| **BF16 training** | BF16 | BF16 | FP32 | Default on Neuron (auto-cast) |
-| **FP8 training** | FP8 E4M3 | BF16 | FP32 | Faster iteration on Trn2 |
-| **FP8 inference** | FP8 E4M3 | FP8 E4M3 | — | Maximum throughput |
-| **INT8 inference** | INT8 | BF16 | — | Alternative to FP8 |
+Here's the insight that connects precision to the rest of this book:
 
-Each step down the ladder trades precision for speed. The compiler's FP32 accumulation in PSUM means the precision loss happens only at the storage/casting level — the math itself is always full precision.
+FP8 makes matmuls 2× faster (half the bytes, double the TFLOPS). But a transformer layer isn't just matmuls. Between each matmul sits a softmax, a layer norm, a GELU — all running on the Vector and Scalar engines in BF16. When you halve the matmul time, those non-matmul ops don't get any faster. They become a larger fraction of total runtime.
 
-*Question raised → "I've squeezed what I can from precision and compilation. The profiler still shows gaps between matmuls. What now?"*
+Before FP8: matmuls take 80% of the time, non-matmul takes 20%.
+After FP8: matmuls take 67% of the time, non-matmul takes 33%.
+
+You got a ~1.2× end-to-end speedup, not the 2× you expected. The bottleneck shifted from the Tensor Engine to the Vector/Scalar engines — from compute to the ops *between* compute.
+
+This is Amdahl's Law applied to hardware engines. And it's exactly why Part V exists. The non-matmul gaps — softmax, normalization, activation functions, reductions — are where NKI kernels deliver the next jump. A fused attention kernel that keeps scores in SBUF and does softmax inline eliminates the gap entirely. A fused RMSNorm+Quantize kernel (like `nisa.quantize_mx` on Trn3) turns two engine handoffs into one instruction.
+
+The precision ladder gets you from 30% MFU to 50%. Custom kernels for the shifted bottleneck get you from 50% to 80%.
+
+---
+
+*The profiler shows gaps between matmuls. The matmuls themselves are fast. The bottleneck has shifted to ops the compiler can't fuse well enough. Time to write your own.*
 
 *Next: Part V — Writing your own kernels (NKI).*
