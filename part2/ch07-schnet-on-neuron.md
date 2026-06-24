@@ -1,208 +1,358 @@
-# Example 1: Getting SchNet running on Neuron
+# Case Study: SchNet on Neuron
 
-*You have a molecular GNN. You want it on Neuron. What breaks, what works, and what do you do about it?*
+*A molecular GNN, its scatter/gather bottleneck, and the matmul trick that gives us 14.7× speedup.*
+
+```{admonition} Run it yourself
+:class: tip
+Two scripts accompany this chapter (run on a trn2.3xlarge with the Neuron venv activated):
+
+- `scripts/ch7_schnet_example.py` — profiles the original SchNet, shows fallbacks, benchmarks `torch.compile`
+- `scripts/ch7_schnet_example_matmulfix.py` — applies the matmul reformulation and benchmarks the speedup
+
+The original SchNetPack library is open source: [github.com/atomistic-machine-learning/schnetpack](https://github.com/atomistic-machine-learning/schnetpack.git) (we use commit `de850eb`).
+```
 
 ---
 
-## Introducing SchNet
+## The Model: SchNet
 
-SchNet is a message-passing neural network for predicting molecular properties — energies, forces, potential energy surfaces. It uses continuous-filter convolutions on atom positions with radial basis functions and stacked interaction blocks with residual connections. It's the workhorse of computational chemistry: drug discovery (binding affinity), materials science, and molecular dynamics simulations all rely on architectures like this.
+SchNet is a message-passing neural network for predicting molecular properties — energies, forces, potential energy surfaces. It's the workhorse of computational chemistry: drug discovery, materials science, and molecular dynamics all rely on architectures like this.
 
-The key characteristic for this chapter: SchNet uses **scatter/gather operations** in every interaction layer. Message passing in GNNs means "sum messages from neighbors into each atom" — and that's an `index_add` (scatter) operation. Let's see what happens when we bring this to Neuron.
+Each interaction layer does three things:
+
+```python
+def forward(self, x, f_ij, idx_i, idx_j, rcut_ij):
+    x = self.in2f(x)                              # linear projection
+    Wij = self.filter_network(f_ij) * rcut_ij     # edge weights from distances
+    
+    x_j = x[idx_j]                                # ← GATHER neighbor features
+    x_ij = x_j * Wij                              # weight the messages
+    x = scatter_add(x_ij, idx_i, dim_size=N)      # ← SCATTER sum into atoms
+    
+    x = self.f2out(x)                              # linear projection
+    return x
+```
+
+The linear projections and element-wise ops are fine on any hardware. The **gather** (`x[idx_j]`) and **scatter_add** are the problem — they require indirect memory access that the NeuronCore's tensor engine can't do natively.
 
 ---
 
-## Move to Neuron — it just works
+## Move to Neuron — it just works (slowly)
+
+```python
+model = SchNet(n_atom_basis=128, n_interactions=6, ...).eval()
+model_neuron = model.to("neuron")
+output = model_neuron(inputs)  # ✓ correct output, max diff vs CPU: 0.000012
+```
+
+Zero code changes needed. But profiling reveals the cost:
+
+```
+Top ops by CPU time:
+  aten::index (gather)       ×6    18.3ms   ← falls back to CPU
+  aten::index_add (scatter)  ×6     5.5ms   ← falls back to CPU
+  aten::to (device transfer) ×55    5.1ms   ← PCIe round-trips
+
+Fallback overhead: 22.7% of forward pass
+```
+
+Every interaction layer triggers two CPU fallbacks plus the PCIe data transfers to move tensors back and forth. The tensor engine sits idle while the CPU handles these ops.
+
+`torch.compile` helps — it fuses the linear/activation sequences between fallbacks — but can't eliminate the fallbacks themselves:
+
+| Mode | Time | vs Eager |
+|------|------|----------|
+| Eager | 28.3ms | — |
+| Compiled | 4.3ms | 6.5× |
+| CPU baseline | 2.3ms | — |
+
+The compiled model is still **slower than CPU** for small molecules because the fallback overhead exceeds the compute benefit.
+
+---
+
+## Understanding Gather and Scatter
+
+To fix the bottleneck, we need to understand exactly what these operations do. Let's trace through a concrete example.
+
+Consider a tiny molecule with 4 atoms and 6 directed edges:
+
+```{figure} ../assets/gnn_image.png
+:width: 400px
+:align: center
+
+A 4-atom graph. Each arrow is a directed edge carrying a message from source → destination. idx_i stores destinations, idx_j stores sources.
+```
 
 ```python
 import torch
-from schnetpack.representation import SchNet
-from schnetpack.nn.radial import GaussianRBF
-from schnetpack.nn.cutoff import CosineCutoff
-import schnetpack.properties as properties
 
-model = SchNet(
-    n_atom_basis=128,
-    n_interactions=6,
-    radial_basis=GaussianRBF(n_rbf=20, cutoff=5.0),
-    cutoff_fn=CosineCutoff(cutoff=5.0),
-).eval()
+# 4 atoms, each with a 2D feature vector
+x = torch.tensor([[1.0, 2.0],   # atom 0
+                  [3.0, 4.0],   # atom 1
+                  [5.0, 6.0],   # atom 2
+                  [7.0, 8.0]])  # atom 3
 
-# Synthetic inputs: 50-atom molecule with 20 neighbors each
-n_atoms, n_neighbors = 50, 20
-n_pairs = n_atoms * n_neighbors
-inputs = {
-    properties.Z: torch.randint(1, 10, (n_atoms,)).to("neuron"),
-    properties.Rij: torch.randn(n_pairs, 3).to("neuron"),
-    properties.idx_i: torch.randint(0, n_atoms, (n_pairs,)).to("neuron"),
-    properties.idx_j: torch.randint(0, n_atoms, (n_pairs,)).to("neuron"),
-}
+# Edge list: idx_i[e] = destination, idx_j[e] = source
+idx_i = torch.tensor([0, 0, 1, 1, 2, 3])  # where messages go TO
+idx_j = torch.tensor([1, 2, 0, 3, 0, 1])  # where messages come FROM
 
-model_neuron = model.to("neuron")
-with torch.no_grad():
-    output = model_neuron(inputs)
-
-print(f"Output device: {output['scalar_representation'].device}")  # neuron:0
-print(f"Output shape: {output['scalar_representation'].shape}")    # [50, 128]
-print(f"Matches CPU: {torch.allclose(...)}")                       # True (max diff: 0.000012)
+N = 4  # atoms
+E = 6  # edges
 ```
 
-**Zero code changes.** The model runs, produces correct output (verified against CPU within 12 µ tolerance), and the first call takes ~15 seconds (JIT compilation of each op into NEFFs). Subsequent calls hit the cache.
+### Gather: `x[idx_j]`
 
----
-
-## The fallback list — what landed on CPU?
-
-Profiling the eager forward pass reveals where time actually goes:
-
-```none
-Top ops by CPU time:
-  aten::index                                        ×6       18.3ms
-  _scatter_add / aten::index_add                     ×6        5.5ms
-  aten::to / aten::_to_copy (device transfers)       ×55       5.1ms
-  aten::linear                                       ×30       0.4ms
-  aten::softplus                                     ×12       0.1ms
-
-Fallback overhead (to/copy ops): 9.75 ms / 42.94 ms total
-Fallback fraction: 22.7%
-```
-
-Two operations dominate, called 6 times each (once per interaction layer):
-1. **`aten::index`** (18.3ms) — the neighbor gather `x[idx_j]`. Fancy indexing with an integer index tensor.
-2. **`aten::index_add`** (5.5ms) — the message aggregation `scatter_add(x_ij, idx_i)`. Summing messages into target atoms.
-
-The 55 `aten::to` / `aten::_to_copy` calls are the PCIe round-trips: tensors moving from HBM → CPU → HBM for each fallback. **22.7% of the forward pass is pure data movement overhead** — not compute.
-
-```{admonition} Why these ops fall back
-:class: note
-`aten::index` with an integer index tensor requires **indirect memory access** — reading from arbitrary, non-contiguous locations determined by the index values at runtime. The NeuronCore's DMA engines operate on contiguous blocks; they can't do random gather natively. Similarly, `index_add` (scatter) requires atomic accumulation into arbitrary positions — a sequential operation that doesn't map to the systolic array or vector engines.
-```
-
----
-
-## Compiling SchNet — what improves, what doesn't
+"For each edge, grab the feature vector of the source atom."
 
 ```python
-compiled_model = torch.compile(model_neuron, backend="neuron")
+x_j = x[idx_j]
+# tensor([[3., 4.],   ← x[1], edge 0 reads from atom 1
+#         [5., 6.],   ← x[2], edge 1 reads from atom 2
+#         [1., 2.],   ← x[0], edge 2 reads from atom 0
+#         [7., 8.],   ← x[3], edge 3 reads from atom 3
+#         [1., 2.],   ← x[0], edge 4 reads from atom 0
+#         [3., 4.]])  ← x[1], edge 5 reads from atom 1
 ```
 
-```none
-Compilation time: 1.4s
-NEFFs generated: 37
-Dynamo graph analysis: Graph Count: 1, Graph Break Count: 0, Op Count: 106
-```
+This is **fancy indexing** — non-contiguous memory access. The hardware chases pointers into random locations of x. On Neuron, this falls back to CPU because the DMA engines only handle contiguous blocks.
 
-Interesting result: **zero graph breaks**. Dynamo successfully traced the entire model — including `index`, `index_add`, and `getitem` — into a single graph of 106 ops. These ops have Dynamo-level support; they simply execute via CPU fallback *within* the compiled graph. The 37 NEFFs represent the segments between fallback boundaries at the HLO compilation level.
+### Scatter-add: `index_add_(0, idx_i, x_ij)`
 
-**Performance:**
-- Eager: 28.3ms
-- Compiled: 4.3ms
-- **Speedup: 6.5×**
-
-The 6.5× speedup comes from Dynamo eliminating Python dispatch overhead and the Neuron backend fusing the `linear` + `softplus` + `mul` sequences between fallback ops. But the fallbacks themselves remain — the compiler can't eliminate what has no native implementation.
-
----
-
-## The scaling question — when does Neuron win?
-
-At 50 atoms, Neuron is **slower than CPU** (4.3ms vs 2.5ms). The fallback overhead exceeds the compute benefit. But what happens as molecules get larger?
-
-```none
-  Config                     Atoms    Pairs   CPU ms  Neuron ms  Speedup
-  ------------------------- ------ -------- -------- ---------- --------
-  small molecule                50     1000     2.48       4.29     0.58×
-  medium protein fragment      200     6000    10.46      16.06     0.65×
-  small protein                500    25000    38.43      51.55     0.75×
-  medium protein              1000    50000    86.45      92.57     0.93×
-  large protein               2000   100000   311.44     172.55     1.80×
-```
-
-```{admonition} The crossover point
-:class: important
-At ~1500 atoms, Neuron breaks even with CPU. Above 2000 atoms, Neuron is **1.8× faster** — despite the fallbacks still happening every layer. The linear algebra in the filter network (30 `linear` ops per forward pass) finally dominates over the 12 scatter/index fallbacks.
-```
-
-The ratio converges toward 1.0 around 1000 atoms, then Neuron pulls ahead. This is the fundamental tradeoff: **fixed fallback cost** (PCIe round-trips don't depend on tensor size) vs **scaling compute benefit** (matmuls scale with atom count). For large enough systems, the matmuls win.
-
----
-
-## The decision framework
-
-For each fallback op, ask three questions:
-
-| Question | `aten::index` (neighbor gather) | `aten::index_add` (scatter) |
-|----------|-------------------------------|---------------------------|
-| In the hot path? | Yes — every layer × 6 layers | Yes — every layer × 6 layers |
-| How much data moves? | `[n_pairs, 128]` — scales with graph size | `[n_pairs, 128]` — same |
-| Neuron-native alternative? | Reformulate as matmul (see below) | Reformulate as matmul |
-
-**Decision matrix:**
-- **Small molecules (< 1000 atoms):** keep on CPU, or reformulate scatter→matmul
-- **Large molecules (> 1500 atoms):** Neuron wins even WITH fallbacks — deploy as-is
-- **Maximum performance at any scale:** NKI kernel for scatter/gather (Part V)
-
----
-
-## The scatter-as-matmul reformulation
-
-`scatter_add(x_ij, idx_i, dim_size=n_atoms)` is mathematically equivalent to `A @ x_ij` where A is a binary selection matrix:
+"For each edge, ADD its message into the destination atom's accumulator."
 
 ```python
-# Build adjacency matrix: A[j, i] = 1 if edge i targets atom j
-A = torch.zeros(n_atoms, n_pairs, dtype=torch.bfloat16)
-A[idx_i, torch.arange(n_pairs)] = 1.0
+x_ij = torch.tensor([[0.3, 0.4],   # edge 0 → atom 0
+                     [0.5, 0.6],   # edge 1 → atom 0
+                     [0.1, 0.2],   # edge 2 → atom 1
+                     [0.7, 0.8],   # edge 3 → atom 1
+                     [0.9, 1.0],   # edge 4 → atom 2
+                     [0.2, 0.3]])  # edge 5 → atom 3
 
-# These produce identical results:
-scatter_result = torch.zeros(n_atoms, 128).index_add(0, idx_i, x_ij)
-matmul_result = A @ x_ij
-# max diff: 0.000004
+out = torch.zeros(N, 2)
+out.index_add_(0, idx_i, x_ij)
+# tensor([[0.8, 1.0],   ← edges 0,1 summed into atom 0
+#         [0.8, 1.0],   ← edges 2,3 summed into atom 1
+#         [0.9, 1.0],   ← edge 4 into atom 2
+#         [0.2, 0.3]])  ← edge 5 into atom 3
 ```
 
-On Neuron, the matmul runs natively on the tensor engine — no fallback:
+This is a **reduction with irregular grouping** — multiple edges write to the same atom. The hardware must handle atomic accumulation into arbitrary positions. Also falls back to CPU.
 
-```none
-scatter_add (with CPU fallback): 1.280 ms
-matmul (native on Neuron):       0.215 ms
-Speedup from reformulation:      6.0×
+---
+
+## The Matmul Reformulation
+
+Here's the key insight: **any gather or scatter on a 1D index can be expressed as multiplication by a binary matrix.** And matrix multiply is exactly what the tensor engine is built for.
+
+### Gather → G @ x
+
+We construct a **gather matrix** G of shape [E edges × N atoms] where each row has a single 1 in the column of the source atom:
+
+```python
+G = torch.zeros(E, N)
+G[torch.arange(E), idx_j] = 1.0
 ```
 
-**The tradeoff:** the dense adjacency matrix costs O(atoms × edges) memory.
-- 50 atoms × 1000 pairs = 98 KB — trivial
-- 500 atoms × 25000 pairs = 24 MB — fits in SBUF
-- 2000 atoms × 100000 pairs = 382 MB — **too large**, needs sparse/blocked approach
+| | atom 0 | atom 1 | atom 2 | atom 3 |
+|---|:---:|:---:|:---:|:---:|
+| edge 0 (src=1) | 0 | **1** | 0 | 0 |
+| edge 1 (src=2) | 0 | 0 | **1** | 0 |
+| edge 2 (src=0) | **1** | 0 | 0 | 0 |
+| edge 3 (src=3) | 0 | 0 | 0 | **1** |
+| edge 4 (src=0) | **1** | 0 | 0 | 0 |
+| edge 5 (src=1) | 0 | **1** | 0 | 0 |
 
-For small-to-medium graphs, this reformulation eliminates the fallback entirely and keeps everything on the tensor engine. For large graphs, you'd need a block-sparse variant or an NKI kernel.
+Each row has exactly one 1, so `G[e, :] @ x` picks out row `idx_j[e]` of x — exactly what `x[idx_j[e]]` does.
 
-```{admonition} The reformulation principle
+```python
+x_j_matmul = G @ x
+assert torch.allclose(x_j, x_j_matmul)  # ✓ identical
+```
+
+### Scatter-add → A @ x_ij
+
+We construct a **scatter matrix** A of shape [N atoms × E edges] where row `a` has 1s in every column where `idx_i == a`:
+
+```python
+A = torch.zeros(N, E)
+A[idx_i, torch.arange(E)] = 1.0
+```
+
+| | edge 0 | edge 1 | edge 2 | edge 3 | edge 4 | edge 5 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| atom 0 (receives 0,1) | **1** | **1** | 0 | 0 | 0 | 0 |
+| atom 1 (receives 2,3) | 0 | 0 | **1** | **1** | 0 | 0 |
+| atom 2 (receives 4) | 0 | 0 | 0 | 0 | **1** | 0 |
+| atom 3 (receives 5) | 0 | 0 | 0 | 0 | 0 | **1** |
+
+Row `a` of A sums all edge messages destined for atom a — exactly what scatter_add does.
+
+```python
+out_matmul = A @ x_ij
+assert torch.allclose(out_scatter, out_matmul)  # ✓ identical
+```
+
+### The full reformulated forward pass
+
+```python
+# ORIGINAL (irregular memory access → CPU fallback):
+x_j = x[idx_j]                    # gather: chase pointers
+x_ij = x_j * Wij                  # element-wise (fine)
+out = zeros(N, F)
+out.index_add_(0, idx_i, x_ij)    # scatter: atomic adds to random locations
+
+# REFORMULATED (pure matmul → tensor engine):
+x_j = G @ x                       # gather: [E×N] @ [N×F] → [E×F]
+x_ij = x_j * Wij                  # element-wise (unchanged)
+out = A @ x_ij                    # scatter: [N×E] @ [E×F] → [N×F]
+```
+
+Both produce **identical outputs**. The matmul version just expresses indexing logic as matrix multiplication with binary (0/1) matrices.
+
+```{admonition} Why does this help?
 :class: tip
-This is the deepest performance engineering insight for Neuron: **if the tensor engine can't do your operation directly, ask whether you can reformulate it as something it CAN do.** The tensor engine is 90% of your available FLOPs. Feeding it work — even "wasteful" dense matmuls over sparse data — often beats the alternative of falling back to CPU or using the weaker scalar engine.
+
+| | Original | Matmul |
+|---|---|---|
+| Gather | CPU fallback (indirect memory) | Tensor engine GEMM |
+| Scatter | CPU fallback (atomic reduction) | Tensor engine GEMM |
+| Compiler | Can't fuse across fallbacks | Fuses entire layer into one NEFF |
+
+The tensor engine is 90% of your available FLOPs. Feeding it work — even "wasteful" dense matmuls over sparse binary matrices — beats falling back to CPU.
+```
+
+### End-to-end verification
+
+```python
+# Full message passing — original vs matmul
+x_j_orig = x[idx_j]
+msg_orig = x_j_orig * 0.5   # simplified edge weight
+out_orig = torch.zeros(N, 2)
+out_orig.index_add_(0, idx_i, msg_orig)
+
+x_j_mat = G @ x
+msg_mat = x_j_mat * 0.5
+out_mat = A @ msg_mat
+
+assert torch.allclose(out_orig, out_mat)
+# ✓ Full message passing: original == matmul reformulation
 ```
 
 ---
 
-## When eager is enough
+## Patching SchNet
 
-Not every model needs `torch.compile`. The two-persona workflow:
+Applying this to the real model takes 15 lines. We monkey-patch the forward method of each interaction layer:
 
-- **Research persona:** eager mode. Fast iteration, `print()` works, `pdb` works, instant feedback. You're scanning hyperparameters or debugging a new architecture — compilation overhead isn't worth it.
-- **Production persona:** compiled mode. You've frozen the architecture, you know the input shapes, and you want maximum throughput for deployment.
+```python
+import types
 
-Rule of thumb: if your forward pass is < 10ms in eager, torch.compile's overhead (guard checking, recompilation risk) may not pay off. For SchNet at 50 atoms, eager is actually fine — the model is too small for Neuron anyway.
+def matmul_forward(self, x, f_ij, idx_i, idx_j, rcut_ij):
+    """Drop-in replacement for SchNetInteraction.forward."""
+    x = self.in2f(x)
+    Wij = self.filter_network(f_ij) * rcut_ij[:, None]
+    x_j = self.G @ x        # gather via matmul
+    x_ij = x_j * Wij
+    x = self.A @ x_ij       # scatter via matmul
+    x = self.f2out(x)
+    return x
+
+def patch_schnet_with_matmul(model, idx_i, idx_j, n_atoms, n_pairs, device):
+    G = torch.zeros(n_pairs, n_atoms, dtype=torch.float32, device=device)
+    G[torch.arange(n_pairs, device=device), idx_j] = 1.0
+
+    A = torch.zeros(n_atoms, n_pairs, dtype=torch.float32, device=device)
+    A[idx_i, torch.arange(n_pairs, device=device)] = 1.0
+
+    for interaction in model.interactions:
+        interaction.register_buffer("G", G)
+        interaction.register_buffer("A", A)
+        interaction.forward = types.MethodType(matmul_forward, interaction)
+```
+
+Correctness check on CPU (same weights, same inputs, before and after patching):
+
+```
+Max diff: 0.000001
+✓ Matmul reformulation is numerically exact
+```
+
+---
+
+## Benchmark Results
+
+Compiled matmul-reformulated SchNet vs the original, on trn2.3xlarge:
+
+| Config | CPU | Original (Neuron) | Matmul+Compile (Neuron) | vs CPU | vs Original |
+|--------|-----|-------------------|------------------------|--------|-------------|
+| 50 atoms, 1K edges | 2.32ms | 4.31ms | 1.60ms | **1.4×** | 2.7× |
+| 200 atoms, 6K edges | 8.32ms | 15.98ms | 1.45ms | **5.7×** | 11× |
+| 500 atoms, 20K edges | 33.09ms | 41.66ms | 2.83ms | **11.7×** | 14.7× |
+
+The original compiled model is *slower than CPU* at every scale because of scatter/gather fallbacks. The matmul reformulation eliminates all fallbacks, letting the compiler fuse the entire interaction layer — and the speedup grows with molecule size because larger matmuls better utilize the systolic array.
+
+```{admonition} Why the scaling is superlinear
+:class: note
+At 50 atoms the matmul is [1000×50] @ [50×128] — too small to fill the tensor engine's pipeline. At 500 atoms it's [20000×500] @ [500×128] — large enough for efficient systolic array utilization. The compute intensity crosses the roofline threshold.
+```
+
+---
+
+## The Memory Tradeoff
+
+G and A are mostly zeros. The memory cost:
+
+| System | Atoms | Edges | G+A Size | Fits in... |
+|--------|-------|-------|----------|------------|
+| Drug molecule | 50 | 1,000 | 0.4 MB | SBUF (28 MB) ✓ |
+| Protein fragment | 200 | 6,000 | 9.2 MB | SBUF ✓ |
+| Small protein | 500 | 20,000 | 76 MB | HBM (32 GB) ✓ |
+| Full protein | 5,000 | 200,000 | 7.6 GB | Tight in HBM ⚠️ |
+
+For drug discovery (< 1000 atoms) this approach works perfectly. For larger systems, you'd need either:
+- A **block-sparse** variant that tiles the adjacency matrices
+- A **custom NKI kernel** that operates on the edge list directly (Part V)
+
+```{admonition} When is the graph static enough?
+:class: note
+The G and A matrices must be rebuilt when the neighbor list changes. In molecular dynamics with a cutoff radius, neighbor lists typically update every 10–50 timesteps. The matrix construction cost (negligible at these sizes) is amortized over many forward passes.
+```
+
+---
+
+## The Reformulation Principle
+
+```{admonition} The deepest performance insight for Neuron
+:class: important
+If the tensor engine can't do your operation directly, ask: **can I reformulate it as something it CAN do?**
+
+The tensor engine is a systolic array. It does one thing: multiply matrices. Everything else — scatter, gather, sort, argmax, custom reductions — either falls back to CPU or runs on the much weaker scalar/vector engines.
+
+Feeding the tensor engine "wasteful" dense matmuls over sparse binary data often beats the alternative of falling back to CPU. The math is the same. The hardware utilization is completely different.
+```
+
+This principle extends beyond GNNs:
+- **Sparse attention** → dense matmul with masking
+- **Embedding lookup** → one-hot @ embedding table
+- **Histogram/bincount** → one-hot transpose @ values
+- **Top-k selection** → sort via matmul with comparison matrices
+
+Any time you see `tensor[index]` in a hot path on Neuron, ask: "can I express this as a matmul?"
 
 ---
 
 ## Summary
 
-| What we tried | Result |
-|---|---|
-| `model.to("neuron")` | Works with zero code changes, numerically correct |
-| Profile eager mode | 22.7% of time is fallback overhead (index + scatter) |
-| `torch.compile` | 6.5× over eager, zero graph breaks, but fallbacks remain |
-| Scale to 2000 atoms | Neuron 1.8× faster than CPU despite fallbacks |
-| Scatter → matmul | 6× speedup on the isolated op, eliminates fallback entirely |
+| Step | What we learned |
+|------|----------------|
+| `model.to("neuron")` | Works with zero changes, numerically correct |
+| Profile | 22.7% of time is fallback overhead (gather + scatter) |
+| `torch.compile` | 6.5× over eager, but fallbacks remain → still slower than CPU |
+| Matmul reformulation | Numerically exact, eliminates all fallbacks |
+| Benchmark | **14.7× faster** than original Neuron, **11.7× faster** than CPU |
 
-The story: **correctness is free, performance requires understanding.** SchNet runs on Neuron instantly. Making it run *fast* requires knowing where the bottlenecks are (profiling), understanding why they exist (hardware architecture from Ch 4-5), and choosing the right fix (reformulation, scaling up, or eventually writing a kernel).
+The lesson: **correctness is free, performance requires understanding.** The compiler can't fix a hardware mismatch. Understanding that scatter/gather = matmul with binary matrices lets you convert an operation the hardware *can't do* into one it's *optimized for*.
 
 ---
 
-*The compiler helped with fused ops but couldn't eliminate the scatter fallbacks. Where exactly is the time going at the hardware level? Next we'll learn to measure before we optimize.*
+*Next: we'll look at how to measure where time actually goes at the hardware level — is it compute-bound or memory-bound? The profiling tools that answer this question.*
