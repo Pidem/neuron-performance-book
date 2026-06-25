@@ -31,6 +31,8 @@ Each level requires more knowledge but delivers more performance. This book take
 - **Parts IV–V** — Optimizing: number formats, then custom NKI kernels
 - **Part VI** — Scaling out and production
 
+All runnable scripts live in the `scripts/` folder, one per chapter. Each is self-contained and tested on a `trn2.3xlarge`.
+
 ## Hardware setup
 
 All code in this book has been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
