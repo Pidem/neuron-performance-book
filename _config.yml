@@ -20,7 +20,7 @@ html:
   use_edit_page_button: true
   home_page_in_navbar: false
   extra_footer: |
-    <p>Making the most of your PyTorch models on Neuron chips</p>
+    <p>By <a href="https://www.pierredemalliard.com">Pierre de Malliard</a></p>
 
 sphinx:
   extra_extensions:
