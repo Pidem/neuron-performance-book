@@ -16,8 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: jupyter-book build .
+      - run: pip install uv && uv sync
+      - run: uv run jupyter-book build .
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _build/html
