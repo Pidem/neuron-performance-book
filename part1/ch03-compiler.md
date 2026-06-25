@@ -378,7 +378,7 @@ These are software-level decisions that directly translate into hardware-level o
 
 But we've also hit the compiler's limits. It can't fix algorithmic complexity, optimize across compilation boundaries, or beat a hand-written kernel that exploits hardware-specific knowledge. For that, you need to understand the hardware itself.
 
-```{figure} ../assets/meme_Firsttime.png
+```{figure} ../assets/meme_firsttime.png
 :alt: First time?
 :width: 400px
 :align: center
