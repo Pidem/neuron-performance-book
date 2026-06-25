@@ -16,13 +16,28 @@ Scripts for this chapter (run on trn2.3xlarge with Neuron venv activated):
 
 ## The 2D memory model
 
-In Chapter 14, we treated SBUF as a simple buffer. Now we need to understand its physical layout:
+In Chapter 14, we treated SBUF as a simple buffer. Now we need to understand its physical layout.
 
-- **SBUF and PSUM are physically 2D:** 128 partition lanes × a free dimension
-- **Partition dimension (P):** 128 parallel lanes. All 128 fire simultaneously — this is where parallelism lives.
-- **Free dimension (F):** depth within each lane. Data is processed sequentially along this axis.
+If you think of a tensor as a matrix, SBUF is a matrix with exactly 128 rows and as many columns as you need. The hardware processes all 128 rows simultaneously on every clock cycle. Each row is a **lane**:
 
-A **tile** is any tensor whose leftmost dimension maps to the partition dimension. Every NKI instruction operates on tiles. If your data isn't tile-shaped, you must reshape or reindex it first.
+```
+Your tensor [128, 512] in SBUF:
+
+Lane 0:   [x₀₀, x₀₁, x₀₂, ... x₀₅₁₁]   ← all 128 lanes fire
+Lane 1:   [x₁₀, x₁₁, x₁₂, ... x₁₅₁₁]   ← simultaneously
+Lane 2:   [x₂₀, x₂₁, x₂₂, ... x₂₅₁₁]   ← on every cycle
+...
+Lane 127: [x₁₂₇₀, x₁₂₇₁, ... x₁₂₇₅₁₁] ←
+           ─────────────────────────────→
+           columns processed sequentially
+```
+
+When the vector engine computes a sum across columns, it reduces within each lane independently. All 128 reductions happen at the same time. NKI names these two axes:
+
+- **Partition dimension (P):** which lane. 128 parallel lanes. All 128 fire simultaneously.
+- **Free dimension (F):** position within a lane. Data is processed sequentially along this axis.
+
+A **tile** is any tensor whose first dimension maps to the partition dimension. Every NKI instruction operates on tiles. If your data isn't tile-shaped, you must reshape or reindex it first.
 
 ```
             Free dimension (F) →

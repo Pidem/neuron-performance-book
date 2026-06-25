@@ -10,10 +10,57 @@ Smaller numbers mean fewer bytes crossing the bus, which means higher effective 
 
 ## Why precision matters for performance
 
-- Moving data is the bottleneck (Ch 5). If you halve the bytes per element, you halve the DMA time
-- For a memory-bound operation (like token generation, B=1): switching from BF16 (2 bytes) to FP8 (1 byte) is nearly 2× faster — same FLOPs, half the data movement
-- For a compute-bound operation (like large matmul in training): reduced precision may also enable higher FLOPs/s if the hardware supports it (Trn2: 667 TFLOPS BF16, 1299 TFLOPS FP8)
-- The tradeoff: smaller numbers can't represent all values accurately → potential accuracy loss
+From Chapter 9: the arithmetic intensity of a matmul `[B, D] × [D, D]` is approximately B. A training matmul with B=1024 has intensity well above Trn2's critical threshold of 230: the tensor engine is the bottleneck, and DMA finishes loading the next weight tile before compute needs it. But token generation runs at B=1. You load the entire weight matrix (D×D×2 bytes) from HBM to produce a single output vector (D elements). Intensity ≈ 1. The tensor engine sits idle most of the time, waiting for the next weight tile to arrive.
+
+This is where precision connects to performance:
+
+- **Memory-bound ops (token generation, B=1):** switching from BF16 (2 bytes) to FP8 (1 byte) halves the data that crosses the bus. Same math, half the wait. Nearly 2× faster.
+- **Compute-bound ops (training, B=1024):** the bottleneck is already the tensor engine, not DMA. Reduced precision helps only if the hardware computes faster in that format (Trn2: 667 TFLOPS BF16, 1299 TFLOPS FP8).
+- **The tradeoff:** smaller numbers can't represent all values accurately. Potential accuracy loss.
+
+In short: precision reduction helps memory-bound workloads by shrinking the data, and helps compute-bound workloads by unlocking faster hardware paths. Token generation benefits from both.
+
+### Concrete example: ESM-2's FFN weight
+
+```python
+import torch
+
+# ESM-2 FFN weight: [1280, 5120]
+shape = (1280, 5120)
+elements = shape[0] * shape[1]
+
+formats = {
+    "FP32":  (torch.float32, 4),
+    "BF16":  (torch.bfloat16, 2),
+    "FP16":  (torch.float16, 2),
+    "FP8":   (torch.float8_e4m3fn, 1),
+    "INT8":  (torch.int8, 1),
+}
+
+print(f"Tensor shape: {shape} ({elements:,} elements)\n")
+print(f"{'Format':<8} {'Bytes/elem':<12} {'Total size':<12} {'vs FP32'}")
+print("-" * 48)
+
+fp32_size = elements * 4
+for name, (dtype, nbytes) in formats.items():
+    total = elements * nbytes
+    ratio = total / fp32_size
+    print(f"{name:<8} {nbytes:<12} {total/1024/1024:.1f} MB      {ratio:.2f}×")
+```
+
+```none
+Tensor shape: (1280, 5120) (6,553,600 elements)
+
+Format   Bytes/elem   Total size   vs FP32
+------------------------------------------------
+FP32     4            25.0 MB      1.00×
+BF16     2            12.5 MB      0.50×
+FP16     2            12.5 MB      0.50×
+FP8      1            6.2 MB       0.25×
+INT8     1            6.2 MB       0.25×
+```
+
+One FFN layer in FP8 fits in 6.2 MB. In FP32 it's 25 MB. ESM-2 has 33 layers with two FFN projections each, so the full model shrinks from ~1.6 GB (FP32) to ~400 MB (FP8). That's the difference between fitting in SBUF-resident tiling vs. spilling to HBM on every layer.
 
 ---
 
@@ -25,6 +72,17 @@ Every format has three fields: **sign** (1 bit), **exponent** (range), **mantiss
 - More exponent bits → wider range (can represent very large and very small numbers)
 - More mantissa bits → finer precision (more distinct values between two powers of 2)
 - Total bits = sign + exponent + mantissa = storage cost per element
+
+Consider the number $0.000012346789$. In scientific notation: $1.2346789 \times 10^{-5}$. The **exponent** ($-5$) tells you where the decimal point sits. The **mantissa** ($1.2346789$) carries the significant digits. Now limit the mantissa:
+
+| Mantissa digits | Stored as | Lost detail |
+|---|---|---|
+| 8 (full) | $1.2346789 \times 10^{-5}$ | none |
+| 4 | $1.235 \times 10^{-5}$ | last 4 digits rounded |
+| 2 | $1.2 \times 10^{-5}$ | only 2 significant figures survive |
+| 1 | $1 \times 10^{-5}$ | order of magnitude only |
+
+Binary floating point works the same way. FP32 gives you 23 mantissa bits (~7 decimal digits). BF16 gives you 7 bits (~2 digits). FP8 E4M3 gives you 3 bits (~1 digit). The number stays in the right ballpark (the exponent handles that), but fewer mantissa bits mean coarser rounding at each step.
 
 ### The formats you'll encounter
 
@@ -157,22 +215,6 @@ Three questions decide your number format:
 **2. Is this a matmul weight or activation in forward/backward?** → **BF16 by default.** Switch to FP8 when you've validated accuracy AND the operation is memory-bound (intensity < 230). FP8 halves the bytes and doubles effective bandwidth — but only helps if bandwidth was the bottleneck.
 
 **3. Is this inference-only with a latency target?** → **FP8 or INT8 for weights** (halves memory, fits larger models on-chip). Keep activations in BF16 unless you've measured acceptable accuracy loss.
-
-```
-Is it accumulation / optimizer / loss?
-  │ YES → FP32
-  │ NO
-  ▼
-Is it a matmul (forward or backward)?
-  │ YES → BF16 default; FP8 if memory-bound AND accuracy validated
-  │ NO
-  ▼
-Is it softmax / layernorm / reduction?
-  │ YES → FP32 internally (cast back to BF16 after)
-  │ NO
-  ▼
-Element-wise op → same format as its input (BF16)
-```
 
 The rule underneath: **never downcast for compute-bound ops** (you gain nothing — the tensor engine is already saturated). **Always consider downcasting for memory-bound ops** (you shift the bottleneck from bandwidth to compute, which is where you want to be).
 

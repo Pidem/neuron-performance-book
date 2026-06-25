@@ -171,6 +171,57 @@ For a 128×128 @ 128×512 matmul: expect MFU in single digits. The kernel is cor
 
 ---
 
+## The GPSIMD engine: causal masking
+
+The tensor, vector, and scalar engines operate uniformly across 128 lanes. But some operations need data-dependent selection: keep this element, mask that one, based on position. That's GPSIMD territory.
+
+`nisa.affine_select` is purpose-built for causal masks. It generates an affine expression from position indices, evaluates a comparison, and selects between an input tile and a scalar value. All on GPSIMD's 8 cores.
+
+```python
+from nki.language.opcode import greater_equal
+
+@nki.jit
+def causal_mask_kernel(scores):
+    """Apply causal mask: keep scores[i,j] where j<=i, else -inf."""
+    scores_sbuf = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.sbuf)
+    nisa.dma_copy(dst=scores_sbuf, src=scores)
+    
+    masked = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.sbuf)
+    # affine_value = offset + channel_multiplier * i + step * j = 0 + 1*i + (-1)*j = i - j
+    # predicate: (i - j) >= 0  →  j <= i  →  keep (causal, lower triangle)
+    nisa.affine_select(
+        dst=masked,
+        pattern=[[-1, 128]],         # step=-1 along free dim, 128 elements
+        channel_multiplier=1,         # adds partition index (row i)
+        on_true_tile=scores_sbuf,     # keep original score where predicate is True
+        on_false_value=float('-inf'), # mask future positions
+        cmp_op=greater_equal,
+        offset=0,
+    )
+    
+    out = nl.ndarray((128, 128), dtype=nl.float32, buffer=nl.shared_hbm)
+    nisa.dma_copy(dst=out, src=masked)
+    return out
+```
+
+```python
+from torch_neuronx import wrap_nki
+
+wrapped = wrap_nki(causal_mask_kernel)
+scores = torch.ones(128, 128, device="neuron", dtype=torch.float32)
+result = wrapped(scores)
+torch.neuron.synchronize()
+
+r = result.cpu()
+print(f"row 0: {r[0, :5]}")        # [1, -inf, -inf, -inf, -inf]
+print(f"row 4: {r[4, :5]}")        # [1, 1, 1, 1, 1]
+print(f"row 4, col 5: {r[4, 5]}")  # -inf
+```
+
+The affine expression `i - j >= 0` produces the lower-triangular mask that every autoregressive transformer needs. One instruction, no loops, no branching. This is why GPSIMD exists: position-dependent logic that the other engines can't express.
+
+---
+
 ## What you learned
 
 | Concept | What it means |
@@ -179,6 +230,7 @@ For a 128×128 @ 128×512 matmul: expect MFU in single digits. The kernel is cor
 | `nl.load()` / `nl.store()` | Explicit DMA: HBM ↔ SBUF |
 | `nl.matmul()` | Tensor engine matmul, result in PSUM |
 | `nl.copy()` | Move data between on-chip buffers (PSUM → SBUF), can cast dtype |
+| `nl.where()` | GPSIMD conditional logic (8 cores, slow but flexible) |
 | `nl.ndarray(..., buffer=nl.hbm)` | Allocate output tensor in HBM |
 | Tile constraint | First dimension ≤ 128 (partition), second dimension = free |
 | Transpose requirement | Tensor engine LHS must have contraction axis on partition dim |

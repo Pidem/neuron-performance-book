@@ -27,9 +27,8 @@ The model uses an operation that has no Neuron implementation. The compiler can'
 Real examples:
 - **Autodesk (trilinear interpolation):** the model's upsampling layer used an op the compiler couldn't lower. It didn't just fall back to CPU — it crashed the compiler entirely. An NKI kernel unlocked the model.
 - **SchNet (scatter_reduce):** message passing in GNNs requires scatter operations. Every message-passing layer round-tripped through CPU. An NKI kernel kept it on-chip.
-- **EquiformerV3:** 5 unsupported ops (`atan2`, `linalg_cross`, `acos`, `scatter_reduce`, `uniform_`) caused 87× slowdown vs the model's theoretical performance.
 
-### 2. Performance hotspots the compiler misses
+### 2. Performance hotspots the compiler misses56
 
 The operation IS supported, but the compiler's tiling/scheduling is suboptimal for your specific shapes or access patterns.
 

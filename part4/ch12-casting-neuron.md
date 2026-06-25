@@ -21,19 +21,21 @@ Not every tensor in a model needs the same precision. Mixed precision training u
 
 ## Automatic casting with the Neuron compiler
 
-The simplest approach — the compiler handles everything:
+The simplest approach — the compiler handles it:
 
 ```python
-# The compiler auto-casts FP32 models to BF16 by default
+# The compiler auto-casts FP32 matmuls to BF16 by default
 model = EsmModel.from_pretrained("facebook/esm2_t33_650M_UR50D")  # FP32 weights
-model.to("neuron")  # Compiler auto-casts to BF16 at compile time
+model.to("neuron")  # Compiler casts matmul weights to BF16 at compile time
 ```
 
-Under the hood:
-- FP32 weight tensors are cast to BF16 before loading to SBUF
+The default compiler flag is `--auto-cast matmult --auto-cast-type bf16`. This means:
+- FP32 **matmul** weights and operands are cast to BF16 (tensor engine runs in BF16)
 - Matmul accumulation stays in FP32 (PSUM is always FP32)
+- **Non-matmul ops** (softmax, layer norm, GELU) stay in FP32 on the vector/scalar engines
 - Copy from PSUM → SBUF can cast back to BF16 at zero cost
-- The model runs in BF16 but with FP32-equivalent accumulation precision
+
+This is mixed precision by default: matmuls are fast (BF16), reductions are precise (FP32). You can override with `--auto-cast all` (cast everything to BF16) or `--auto-cast none` (keep all FP32).
 
 For most models, this "just works" with no accuracy impact. But you should always validate:
 
@@ -180,11 +182,9 @@ For ESM-2 on protein contact prediction:
 
 ## The shifted bottleneck
 
-Here's the insight that connects precision to the rest of this book:
+FP8 makes matmuls 2× faster (half the bytes, double the TFLOPS). But a transformer layer isn't just matmuls. Between each matmul sits a softmax, a layer norm, a GELU — all running on the Vector and Scalar engines in BF16. When you halve the matmul time, those non-matmul ops don't get any faster: They become a larger fraction of total runtime.
 
-FP8 makes matmuls 2× faster (half the bytes, double the TFLOPS). But a transformer layer isn't just matmuls. Between each matmul sits a softmax, a layer norm, a GELU — all running on the Vector and Scalar engines in BF16. When you halve the matmul time, those non-matmul ops don't get any faster. They become a larger fraction of total runtime.
-
-Before FP8: matmuls take 80% of the time, non-matmul takes 20%.
+Before FP8: matmuls take 80% of the time, non-matmul takes 20%. 
 After FP8: matmuls take 67% of the time, non-matmul takes 33%.
 
 You got a ~1.2× end-to-end speedup, not the 2× you expected. The bottleneck shifted from the Tensor Engine to the Vector/Scalar engines — from compute to the ops *between* compute.
