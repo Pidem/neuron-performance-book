@@ -35,9 +35,9 @@ The AWS Neuron team and the community of architects continuously share some code
 ## re:Invent talks (YouTube videos)
 
 - **[AIM335: Trn3 UltraServers and Anthropic Kernel Optimization](https://www.youtube.com/watch?v=c_1FhdXNUSE)** (Ron Diamont + Jay Gray) — NeuronCore architecture deep dive, NKI in production at Anthropic, the RMSNorm-Quant kernel design
-- **[AIM201: Breakthrough AI Performance with Trainium*](https://www.youtube.com/watch?v=5SgZ3zRJFAY&t=1s)** (Colin Brace + Poolside + DART) — 80% MFU achieved by keeping activations in SRAM, DART's SRAM-to-SRAM collectives
+- **[AIM201: Breakthrough AI Performance with Trainium](https://www.youtube.com/watch?v=5SgZ3zRJFAY&t=1s)** (Colin Brace + Poolside + DART) — 80% MFU achieved by keeping activations in SRAM, DART's SRAM-to-SRAM collectives
 - **[AIM414 Performance engineering on Neuron: How to optimize your LLM with NKI](https://www.youtube.com/watch?v=e09mW8e8G-s)** (Scott Perry, Sadaf Rasool) 
-- **[AIM351 End-to_end Foundation Model Lifecyle](https://www.youtube.com/watch?v=M5ClIj4wamg&t=1s) (Matt McClean)
+- **[AIM351 End-to-end Foundation Model Lifecyle](https://www.youtube.com/watch?v=M5ClIj4wamg&t=1s)** (Matt McClean)
 ---
 
 ## 3rd party books and and blogposts: 
@@ -48,7 +48,7 @@ The AWS Neuron team and the community of architects continuously share some code
   - [Part 3: Sharding](https://jax-ml.github.io/scaling-book/sharding/)
   - [Part 12: GPUs](https://jax-ml.github.io/scaling-book/gpus/)
 - [KV Caching in LLM Inference](https://medium.com/@prathamgrover777/kv-caching-attention-optimization-from-o-n%C2%B2-to-o-n-8b605f0d4072) — why decode is memory-bound
-
+- [Hardware portability is a myth](https://patricktoulme.substack.com/p/portability-is-a-myth-why-the-best?utm_campaign=post&utm_medium=web&triedRedirect=true), Patrick Toulme
 **PyTorch related:**
 - [PyTorch Internals](http://blog.ezyang.com/2019/05/pytorch-internals/) (Edward Z. Yang) — tensor storage, strides, the dispatcher
 - [Tensor Puzzles](https://github.com/srush/Tensor-Puzzles) (Sasha Rush) — exercises for building intuition about tensor operations and indexing

@@ -10,6 +10,12 @@ This book is for ML engineers who want to close that gap on AWS Neuron chips. Th
 
 No hardware background required. 
 
+```{admonition} About this guide
+:class: warning
+This is a personal learning guide and NOT official AWS documentation. This guide is aimed at helping HCLS data scientists get started. For authoritative 
+Neuron documentation, see [AWS Neuron Docs](https://awsdocs-neuron.readthedocs-hosted.com/). Feedback and corrections welcome.
+```
+
 ## What you'll learn
 
 Every chapter comes with code you can run on a Trainium instance. You start by profiling a model you already know, then peel back layers: how the compiler organizes your ops, how data moves through memory, how instructions land on hardware. At each step, understanding the hardware a little better lets you write slightly better software — until you're writing kernels that extract 80% of the chip's theoretical peak.
@@ -24,7 +30,7 @@ Every chapter comes with code you can run on a Trainium instance. You start by p
 
 Each level requires more knowledge but delivers more performance. This book takes you through all three.
 
-## How to use this book
+## How to use this guide
 
 - **Parts I–II** — PyTorch internals and Neuron hardware (start here)
 - **Part III** — Measuring performance: roofline models, the profiler
@@ -35,14 +41,14 @@ All runnable scripts live in the `scripts/` folder, one per chapter. Each is sel
 
 ## Hardware setup
 
-All code in this book has been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
+All code in this guide has been tested on a single **trn2.3xlarge** instance (1 Trainium2 chip, 32GB HBM).
 
 ```{figure} assets/trn2_chip.png
 :alt: Trainium2 chip
 :width: 400px
 :align: center
 
-The AWS Trainium2 chip — your workstation for this book.
+The AWS Trainium2 chip — your workstation for this guide.
 ```
 ### Provisioning a trn2.3xlarge via Capacity Blocks
 
