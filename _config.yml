@@ -1,5 +1,5 @@
 title: "From Data Scientist to Performance Engineer"
-author: <a href="https://www.pierredemalliard.com">Pierre de Malliard</a>
+author: Pierre de Malliard
 copyright: "2026"
 logo: assets/logo.png
 
@@ -19,8 +19,6 @@ html:
   use_repository_button: true
   use_edit_page_button: true
   home_page_in_navbar: false
-  extra_footer: |
-    <p>By <a href="https://www.pierredemalliard.com">Pierre de Malliard</a></p>
 
 sphinx:
   extra_extensions:
@@ -28,6 +26,8 @@ sphinx:
   config:
     html_theme_options:
       navigation_with_keys: true
+      extra_footer: |
+        <p><a href="https://www.pierredemalliard.com">pierredemalliard.com</a></p>
     mathjax3_config:
       tex:
         macros:
