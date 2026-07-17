@@ -29,7 +29,7 @@ The AWS Neuron team and the community of architects continuously share some code
 - [NKI Library](https://github.com/aws-neuron/nki-library) — production-ready kernels (flash attention, RMSNorm-Quant, MoE, fused Adam, etc.)
 - [NKI Samples](https://github.com/aws-neuron/nki-samples) — tutorial-style kernels with explanations
 - [torch-neuronx](https://github.com/aws-neuron/torch-neuronx) — PyTorch Native backend source (open source)
-- [NKI Kernel Skill](https://github.com/Pidem/neuron-performance-book/nki-kernel-skill) ([original](https://github.com/aws-samples/sample-ATX-custom-NKI-Agent)) — an AI coding agent skill that converts PyTorch/Triton kernels to optimized NKI kernels via a generate → compile → verify → profile loop on real Trainium hardware. Install as an MCP server (`uvx kernelforge-nki-mcp@latest`) and point your agent at a kernel to convert.
+- [NKI Kernel Skill](https://github.com/Pidem/neuron-performance-book/tree/main/nki-kernel-skill) ([original](https://github.com/aws-samples/sample-ATX-custom-NKI-Agent)) — an AI coding agent skill that converts PyTorch/Triton kernels to optimized NKI kernels via a generate → compile → verify → profile loop on real Trainium hardware. Install as an MCP server (`uvx kernelforge-nki-mcp@latest`) and point your agent at a kernel to convert.
 
 ---
 
