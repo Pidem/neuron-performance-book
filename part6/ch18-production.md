@@ -14,7 +14,7 @@ This chapter maps that ecosystem — not as a tutorial, but so you understand ho
 
 | Layer | What it does | Who built it |
 |-------|-------------|--------------|
-| **torch_neuronx** | Compiles any PyTorch graph to Neuron hardware | AWS Neuron team |
+| **torch_neuronx** (TorchNeuron) | Compiles any PyTorch graph to Neuron hardware | AWS Neuron team |
 | **optimum-neuron** | Fine-tuning API for HuggingFace models on Neuron | HuggingFace |
 | **vLLM Neuron plugin** | High-throughput LLM serving on Neuron | vLLM community + AWS |
 | **TorchTitan** | Distributed training (FSDP, TP, PP) | PyTorch team |

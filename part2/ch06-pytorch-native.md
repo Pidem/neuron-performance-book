@@ -2,6 +2,11 @@
 
 In Chapter 4, we saw what the NeuronCore hardware looks like: engines, SBUF, DMA. But how does your PyTorch code *reach* those engines? This chapter covers the integration layer: how Neuron registers itself as a PyTorch backend, what happens when you call `.to("neuron")`, and why a one-line change is enough to run any model.
 
+```{admonition} TorchNeuron
+:class: note
+AWS ships this integration as **TorchNeuron**, an open-source, Apache 2.0 native PyTorch backend for Trainium (`pip install torch-neuronx`, [github.com/aws-neuron/torch-neuronx](https://github.com/aws-neuron/torch-neuronx)). Everything in this chapter — the `PrivateUse1` registration, eager and `torch.compile` paths — is what TorchNeuron implements under the hood.
+```
+
 ---
 
 ## The PrivateUse1 backend
@@ -120,6 +125,11 @@ Execute   neuronx-cc compile (seconds)
 ```
 
 The first iteration is slow (compilation). Subsequent iterations with the same shapes are fast (cache hits). This is what we observed in Chapter 1: first call ~8ms, second call ~49µs.
+
+```{admonition} Adaptive eager mode (experimental)
+:class: note
+TorchNeuron also ships an experimental **adaptive eager mode** that reduces per-op launch cost and opportunistically fuses adjacent ops, narrowing the gap to `torch.compile` performance without any code change. It doesn't replace the `torch.compile` path below for production workloads, but it raises the floor on the "eager, zero changes" row of the optimization ladder above.
+```
 
 ### torch.compile mode (graph)
 

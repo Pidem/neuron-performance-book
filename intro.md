@@ -26,7 +26,7 @@ Every chapter comes with code you can run on a Trainium instance. You start by p
 | **torch.compile** | `torch.compile(model, backend="neuron")` | add one line; compiler fuses and tiles | 50–60% |
 | **Custom kernel (NKI)** | `@nki.jit` attention function | You control engines, tiling, pipelining | 80%+ |
 
-*MFU (Model FLOPs Utilization) measures what fraction of the chip's compute capacity your model actually uses, higher is better. A "kernel" here means a small program that runs directly on the accelerator hardware. NKI (Neuron Kernel Interface) is the Python DSL for writing them.*
+*MFU (Model FLOPs Utilization) measures what fraction of the chip's compute capacity your model actually uses (higher is better). A "kernel" here means a small program that runs directly on the accelerator hardware. NKI (Neuron Kernel Interface) is the Python DSL for writing them. This stack (eager, `torch.compile`, and NKI) is called  [TorchNeuron](https://github.com/aws-neuron/torch-neuronx) (`pip install torch-neuronx`); an experimental adaptive eager mode can push the eager row above ~30% with no code change.*
 
 Each level requires more knowledge but delivers more performance. This book takes you through all three.
 
