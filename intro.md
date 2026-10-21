@@ -35,7 +35,12 @@ Each level requires more knowledge but delivers more performance. This book take
 - **Parts I–II** — PyTorch internals and Neuron hardware (start here)
 - **Part III** — Measuring performance: roofline models, the profiler
 - **Parts IV–V** — Optimizing: number formats, then custom NKI kernels
-- **Part VI** — Scaling out and production
+- **Part VI** — Scaling out and production, including where [vLLM Neuron](https://github.com/vllm-project/vllm-neuron) (serving) and [optimum-neuron](https://huggingface.co/docs/optimum-neuron/en/index) (fine-tuning) fit on top of everything you learned
+
+```{admonition} You don't have to write kernels for everything
+:class: tip
+If your model is a popular architecture (Llama, Mistral, Qwen, ...), vLLM Neuron and optimum-neuron already apply the fundamentals this book teaches — graph compilation, BF16 casting, fused NKI attention kernels — under a HuggingFace-shaped API. Read Part VI (Chapter 18) first if you just want to serve or fine-tune a standard model quickly; come back to Parts I–V when you need to understand *why* it's fast, or when your model doesn't fit the mold.
+```
 
 All runnable scripts live in the `scripts/` folder, one per chapter. Each is self-contained and tested on a `trn2.3xlarge`.
 

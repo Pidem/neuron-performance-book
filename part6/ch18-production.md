@@ -27,7 +27,7 @@ The key insight: these tools cover *common* architectures. When your model doesn
 
 ## Fine-tuning: optimum-neuron
 
-[optimum-neuron](https://huggingface.co/docs/optimum-neuron) wraps the HuggingFace Transformers API. You write standard LoRA fine-tuning code, swap `Trainer` for `NeuronTrainer`, and the library handles graph compilation and BF16 mixed precision underneath.
+[optimum-neuron](https://huggingface.co/docs/optimum-neuron/en/index) wraps the HuggingFace Transformers API. You write standard LoRA fine-tuning code, swap `Trainer` for `NeuronTrainer`, and the library handles graph compilation and BF16 mixed precision underneath.
 
 The compiled graphs use the same operator fusion and tiling you saw in Chapters 3–5. When you profile a fine-tuning run with Neuron Explorer, you see the same NEFF execution and DMA patterns from Chapter 10. The abstraction is thin — one layer above the torch_neuronx path you already know.
 
@@ -35,7 +35,7 @@ The compiled graphs use the same operator fusion and tiling you saw in Chapters 
 
 ## Serving: vLLM on Neuron
 
-[vLLM](https://docs.vllm.ai/) handles LLM inference with continuous batching, paged KV cache, and speculative decoding. The Neuron plugin provides:
+[vLLM](https://docs.vllm.ai/) handles LLM inference with continuous batching, paged KV cache, and speculative decoding. [vLLM Neuron](https://github.com/vllm-project/vllm-neuron) is the plugin that ports this to Trainium, and it provides:
 
 - **Continuous batching** — new requests join mid-generation without waiting
 - **Paged KV cache** — virtual-memory management avoids HBM fragmentation
